@@ -1,0 +1,2 @@
+serviceClass: org.opendatakit.aggregate.client.odktables.ServerDiffService
+path: 05B614BD557E3D079F7EF72F3F6B6153.gwt.rpc

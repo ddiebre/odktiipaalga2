@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tasklist //FI \"IMAGENAME eq java.exe\")",
+      "Bash([ -f \"$LOG\" ])",
+      "Bash(grep -q 'Server startup' /c/xampp/tomcat/logs/catalina.__CMDSUB_OUTPUT__.log)",
+      "Bash(break)",
+      "Bash(netstat -ano)",
+      "Bash(tasklist //FI \"PID eq 6960\")",
+      "Bash(tasklist //FI \"PID eq 7364\")",
+      "Bash(tasklist //FI \"PID eq 38996\")"
+    ]
+  }
+}

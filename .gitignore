@@ -1,0 +1,5 @@
+# Classes compilees (regenerees via les compile.bat dans WEB-INF/classes/odk/*)
+WEB-INF/classes/**/*.class
+
+# Parametres locaux Claude Code (permissions propres a cette machine)
+.claude/settings.local.json

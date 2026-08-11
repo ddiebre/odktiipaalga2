@@ -1,0 +1,2 @@
+serviceClass: org.opendatakit.aggregate.client.submission.SubmissionService
+path: 10193519EDDEA08AAA1EC63DFAD59C3E.gwt.rpc

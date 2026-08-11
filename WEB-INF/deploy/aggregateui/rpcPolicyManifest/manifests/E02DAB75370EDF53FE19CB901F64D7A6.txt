@@ -1,0 +1,2 @@
+serviceClass: org.opendatakit.aggregate.client.filter.FilterService
+path: 548DFBA57B91B2F5EAFA6DA0DCCDCF5A.gwt.rpc

@@ -1,0 +1,21 @@
+@FinalFields, false
+com.google.gwt.user.client.rpc.IncompatibleRemoteServiceException, true, true, true, true, com.google.gwt.user.client.rpc.IncompatibleRemoteServiceException/3936916533, 3936916533
+com.google.gwt.user.client.rpc.RpcTokenException, true, true, false, false, com.google.gwt.user.client.rpc.RpcTokenException/2345075298, 2345075298
+com.google.gwt.user.client.rpc.XsrfToken, false, false, true, true, com.google.gwt.user.client.rpc.XsrfToken/4254043109, 4254043109
+java.lang.Exception, true, false, true, false, java.lang.Exception/1920171873, 1920171873
+java.lang.RuntimeException, true, false, true, false, java.lang.RuntimeException/515124647, 515124647
+java.lang.String, true, true, true, true, java.lang.String/2004016611, 2004016611
+java.lang.Throwable, true, false, true, false, java.lang.Throwable/2953622131, 2953622131
+java.util.ArrayList, true, true, true, true, java.util.ArrayList/4159755760, 4159755760
+org.opendatakit.aggregate.client.exception.BadColumnNameExceptionClient, true, true, false, false, org.opendatakit.aggregate.client.exception.BadColumnNameExceptionClient/891368766, 891368766
+org.opendatakit.aggregate.client.exception.FormNotAvailableException, true, true, false, false, org.opendatakit.aggregate.client.exception.FormNotAvailableException/4045162950, 4045162950
+org.opendatakit.aggregate.client.exception.PermissionDeniedExceptionClient, true, true, false, false, org.opendatakit.aggregate.client.exception.PermissionDeniedExceptionClient/2590037113, 2590037113
+org.opendatakit.aggregate.client.exception.RequestFailureException, true, true, false, false, org.opendatakit.aggregate.client.exception.RequestFailureException/3044001568, 3044001568
+org.opendatakit.aggregate.client.exception.TableAlreadyExistsExceptionClient, true, true, false, false, org.opendatakit.aggregate.client.exception.TableAlreadyExistsExceptionClient/4189698264, 4189698264
+org.opendatakit.aggregate.client.odktables.ColumnClient, false, false, true, true, org.opendatakit.aggregate.client.odktables.ColumnClient/3629128323, 3629128323
+org.opendatakit.aggregate.client.odktables.ServerTableService, false, false, false, false, _, 893706844
+org.opendatakit.aggregate.client.odktables.TableDefinitionClient, false, false, true, true, org.opendatakit.aggregate.client.odktables.TableDefinitionClient/2353411421, 2353411421
+org.opendatakit.aggregate.client.odktables.TableEntryClient, true, true, false, false, org.opendatakit.aggregate.client.odktables.TableEntryClient/3144093865, 3144093865
+org.opendatakit.aggregate.client.odktables.TableResourceClient, true, true, false, false, org.opendatakit.aggregate.client.odktables.TableResourceClient/4106686079, 4106686079
+org.opendatakit.common.persistence.client.exception.DatastoreFailureException, true, true, false, false, org.opendatakit.common.persistence.client.exception.DatastoreFailureException/560457744, 560457744
+org.opendatakit.common.security.client.exception.AccessDeniedException, true, true, false, false, org.opendatakit.common.security.client.exception.AccessDeniedException/2724203263, 2724203263

@@ -1,0 +1,2 @@
+serviceClass: org.opendatakit.aggregate.client.preferences.OdkTablesAdminService
+path: 2094DB078272DE97CFD3BF7117EBF1EC.gwt.rpc

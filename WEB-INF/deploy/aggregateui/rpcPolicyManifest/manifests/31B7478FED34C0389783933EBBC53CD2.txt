@@ -1,0 +1,2 @@
+serviceClass: org.opendatakit.aggregate.client.preferences.PreferenceService
+path: AD9DF0C3B7F4A02F22B1E6B59F5773F1.gwt.rpc
