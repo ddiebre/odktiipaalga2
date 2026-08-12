@@ -12,6 +12,7 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.commons.fileupload.FileItem;
 import org.apache.commons.fileupload.disk.DiskFileItemFactory;
@@ -28,6 +29,7 @@ import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
 import odk.common.FormSchemaUtil;
+import odk.common.FormUploadUtil;
 
 /**
  * Admin-only tool (see /editSubmission intercept-url, ROLE_DATA_OWNER) to edit
@@ -226,55 +228,24 @@ public class EditSubmissionServlet extends HttpServlet {
         return FormSchemaUtil.urlEncode(s);
     }
 
-    private static final String PAGE_CSS =
-            "body{margin:0;background:#f4f6f9;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2430;}"
-            + "*{box-sizing:border-box;}"
-            + ".topbar{background:#1e3a5f;color:#fff;padding:14px 24px;font-size:16px;font-weight:600;letter-spacing:.2px;}"
-            + ".topbar-link{color:#fff;text-decoration:none;opacity:.85;}"
-            + ".topbar-link:hover{opacity:1;text-decoration:underline;}"
-            + ".container{max-width:960px;margin:24px auto;padding:0 16px 48px;}"
-            + "h2{font-size:20px;font-weight:600;margin:0 0 16px;color:#1e3a5f;}"
-            + ".card{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);padding:20px 24px;margin-bottom:16px;}"
-            + "a{color:#2563eb;text-decoration:none;}"
-            + "a:hover{text-decoration:underline;}"
-            + ".back-link{display:inline-block;margin-bottom:14px;font-size:13px;}"
-            + "table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);}"
-            + "th,td{text-align:left;padding:10px 14px;border-bottom:1px solid #eef0f3;font-size:14px;}"
-            + "th{background:#f0f3f8;font-weight:600;color:#374151;}"
-            + "tr:last-child td{border-bottom:none;}"
-            + "tr:hover td{background:#f8fafc;}"
-            + "ul.list{list-style:none;padding:0;margin:0;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);overflow:hidden;}"
-            + "ul.list li{border-bottom:1px solid #eef0f3;}"
-            + "ul.list li:last-child{border-bottom:none;}"
-            + "ul.list li a{display:block;padding:12px 16px;}"
-            + "ul.list li a:hover{background:#f8fafc;text-decoration:none;}"
-            + ".form-grid{display:grid;grid-template-columns:220px 1fr;gap:12px 16px;align-items:center;}"
-            + "label{font-weight:600;font-size:13px;color:#374151;}"
-            + "input[type=text],input[type=number],input[type=datetime-local]{width:100%;max-width:360px;padding:7px 10px;"
-            + "border:1px solid #d1d5db;border-radius:6px;font-size:14px;font-family:inherit;}"
-            + "input:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.15);}"
-            + "input[type=checkbox]{width:18px;height:18px;}"
-            + "button{background:#2563eb;color:#fff;border:none;padding:9px 22px;border-radius:6px;font-size:14px;"
-            + "font-weight:600;cursor:pointer;}"
-            + "button:hover{background:#1d4ed8;}"
-            + ".err{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;padding:10px 14px;border-radius:6px;"
-            + "margin-bottom:14px;font-size:14px;}"
-            + ".info{color:#6b7280;font-size:13px;margin-bottom:14px;}"
-            + ".pagination{margin-top:14px;font-size:14px;}"
-            + ".pagination a{margin-right:12px;}"
-            + ".btn-link{display:inline-block;padding:5px 12px;background:#eef2ff;color:#2563eb;border-radius:5px;font-size:13px;}"
-            + ".btn-link:hover{background:#e0e7ff;text-decoration:none;}"
-            + ".actions{margin-top:18px;}"
-            + ".toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;}"
-            + ".success{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:10px 14px;border-radius:6px;"
-            + "margin-bottom:14px;font-size:14px;}"
-            + "input[type=file]{font-size:14px;}";
+    private static final String ICON_PLUS = "<svg viewBox='0 0 24 24'><path d='M12 5v14M5 12h14'/></svg>";
+    private static final String ICON_EDIT =
+            "<svg viewBox='0 0 24 24'><path d='M4 20h4L18.5 9.5a2.121 2.121 0 0 0-3-3L5 17v3z'/><path d='M13.5 6.5l4 4'/></svg>";
+    private static final String ICON_TRASH =
+            "<svg viewBox='0 0 24 24'><path d='M4 7h16'/><path d='M9 7V4h6v3'/>"
+            + "<path d='M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13'/><path d='M10 11v6M14 11v6'/></svg>";
+    private static final String ICON_UPLOAD =
+            "<svg viewBox='0 0 24 24'><path d='M12 16V4'/><path d='M7 9l5-5 5 5'/><path d='M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3'/></svg>";
+    private static final String ICON_DOWNLOAD =
+            "<svg viewBox='0 0 24 24'><path d='M12 4v12'/><path d='M7 11l5 5 5-5'/><path d='M4 20h16'/></svg>";
+    private static final String ICON_MAP =
+            "<svg viewBox='0 0 24 24'><path d='M12 21s7-6.5 7-11a7 7 0 1 0-14 0c0 4.5 7 11 7 11z'/><circle cx='12' cy='10' r='2.4'/></svg>";
 
     private void writeHeader(PrintWriter out, String title) {
         out.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
         out.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
         out.println("<title>" + htmlEscape(title) + "</title>");
-        out.println("<style>" + PAGE_CSS + "</style>");
+        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css'>");
         out.println("</head><body>");
         out.println("<div class='topbar'><a href='home' class='topbar-link'>&laquo; Menu</a> &middot; ODK Tiipaalga &middot; Modifier une soumission</div>");
         out.println("<div class='container'>");
@@ -301,7 +272,9 @@ public class EditSubmissionServlet extends HttpServlet {
             }
             resp.setContentType("text/html;charset=UTF-8");
             PrintWriter out = resp.getWriter();
-            if (formId == null) {
+            if (formId == null && "importForm".equals(action)) {
+                renderImportFormPage(out, null);
+            } else if (formId == null) {
                 renderFormList(conn, out);
             } else if ("new".equals(action)) {
                 renderCreateForm(conn, out, formId, null);
@@ -309,13 +282,19 @@ public class EditSubmissionServlet extends HttpServlet {
                 renderCsvUploadForm(conn, out, formId, null);
             } else if ("map".equals(action)) {
                 renderMap(conn, out, formId);
+            } else if ("delete".equals(action) && uri != null) {
+                renderDeleteConfirm(conn, out, formId, uri, null);
             } else if (uri == null) {
                 int offset = 0;
                 try {
                     offset = Integer.parseInt(req.getParameter("offset"));
                 } catch (NumberFormatException ignored) {
                 }
-                renderSubmissionList(conn, out, formId, offset);
+                String deleted = req.getParameter("deleted");
+                String notice = deleted == null ? null
+                        : "1".equals(deleted) ? "Soumission supprimée."
+                        : deleted + " soumission(s) supprimée(s).";
+                renderSubmissionList(conn, out, formId, offset, notice);
             } else {
                 renderEditForm(conn, out, formId, uri, null, "1".equals(req.getParameter("created")));
             }
@@ -330,6 +309,10 @@ public class EditSubmissionServlet extends HttpServlet {
         String uri = req.getParameter("uri");
         String action = req.getParameter("action");
         try (Connection conn = getDataSource().getConnection()) {
+            if ("importForm".equals(action)) {
+                handleImportForm(conn, req, resp);
+                return;
+            }
             if ("exportSelected".equals(action)) {
                 streamCsvExport(conn, resp, formId, req.getParameterValues("uri"));
                 return;
@@ -355,6 +338,43 @@ public class EditSubmissionServlet extends HttpServlet {
                 renderCreateForm(conn, resp.getWriter(), formId, error);
                 return;
             }
+            if ("deleteConfirm".equals(action)) {
+                String error = null;
+                try {
+                    deleteSubmission(conn, formId, uri);
+                } catch (Exception e) {
+                    error = e.getMessage();
+                }
+                if (error == null) {
+                    resp.sendRedirect("editSubmission?formId=" + urlEncode(formId) + "&deleted=1");
+                    return;
+                }
+                resp.setContentType("text/html;charset=UTF-8");
+                renderDeleteConfirm(conn, resp.getWriter(), formId, uri, error);
+                return;
+            }
+            if ("deleteSelectedConfirm".equals(action)) {
+                resp.setContentType("text/html;charset=UTF-8");
+                renderDeleteConfirmMultiple(resp.getWriter(), formId, req.getParameterValues("uri"), null);
+                return;
+            }
+            if ("deleteSelected".equals(action)) {
+                String[] uris = req.getParameterValues("uri");
+                String error = null;
+                int count = 0;
+                try {
+                    count = deleteSubmissions(conn, formId, uris);
+                } catch (Exception e) {
+                    error = e.getMessage();
+                }
+                if (error == null) {
+                    resp.sendRedirect("editSubmission?formId=" + urlEncode(formId) + "&deleted=" + count);
+                    return;
+                }
+                resp.setContentType("text/html;charset=UTF-8");
+                renderDeleteConfirmMultiple(resp.getWriter(), formId, uris, error);
+                return;
+            }
             resp.setContentType("text/html;charset=UTF-8");
             PrintWriter out = resp.getWriter();
             String error = null;
@@ -372,6 +392,8 @@ public class EditSubmissionServlet extends HttpServlet {
     private void renderFormList(Connection conn, PrintWriter out) throws SQLException {
         writeHeader(out, "Choisir un formulaire");
         out.println("<p class='info'>Sélectionnez le formulaire dont vous voulez modifier une soumission.</p>");
+        out.println("<div class='toolbar'><a class='btn-link' href='editSubmission?action=importForm'>" + ICON_UPLOAD
+                + " Importer un formulaire XML</a></div>");
         out.println("<ul class='list'>");
         String sql = "SELECT \"SUBMISSION_FORM_ID\" FROM odk_prod.\"_form_info_submission_association\" "
                 + "WHERE \"IS_SUBMISSION_ALLOWED\" = true AND \"URI_SUBMISSION_DATA_MODEL\" IS NOT NULL "
@@ -387,9 +409,110 @@ public class EditSubmissionServlet extends HttpServlet {
         writeFooter(out);
     }
 
-    private void renderSubmissionList(Connection conn, PrintWriter out, String formId, int offset) throws SQLException {
+    // ---- Import direct d'un formulaire XML (delegue a l'endpoint ODK existant /formUpload) -----
+
+    private void renderImportFormPage(PrintWriter out, String error) {
+        writeHeader(out, "Importer un formulaire XML");
+        out.println("<p class='back-link'><a href='editSubmission'>&laquo; Formulaires</a></p>");
+        if (error != null) {
+            out.println("<p class='err'>" + htmlEscape(error) + "</p>");
+        }
+        out.println("<div class='card'>");
+        out.println("<p class='info'>Le formulaire sera créé dans ODK et vous serez redirigé vers ses soumissions.</p>");
+        out.println("<form method='post' action='editSubmission?action=importForm' enctype='multipart/form-data'>");
+        out.println("<div class='form-grid'>");
+        out.println("<label>Fichier XML</label><input type='file' name='xmlFile' accept='.xml,text/xml' required>");
+        out.println("<label>Titre</label><input type='text' name='formTitle' "
+                + "placeholder='(facultatif, déduit du nom de fichier si vide)'>");
+        out.println("</div>");
+        out.println("<div class='actions'><button type='submit'>" + ICON_UPLOAD + " Importer</button></div>");
+        out.println("</form>");
+        out.println("</div>");
+        writeFooter(out);
+    }
+
+    private void handleImportForm(Connection conn, HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        byte[] xmlBytes = null;
+        String xmlFileName = null;
+        String formTitle = null;
+        try {
+            if (ServletFileUpload.isMultipartContent(req)) {
+                ServletFileUpload upload = new ServletFileUpload(new DiskFileItemFactory());
+                List<FileItem> items = upload.parseRequest(req);
+                for (FileItem item : items) {
+                    if (!item.isFormField() && "xmlFile".equals(item.getFieldName())) {
+                        xmlBytes = item.get();
+                        xmlFileName = item.getName();
+                    } else if (item.isFormField() && "formTitle".equals(item.getFieldName())) {
+                        formTitle = item.getString("UTF-8");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            resp.setContentType("text/html;charset=UTF-8");
+            renderImportFormPage(resp.getWriter(), "Erreur de lecture du fichier : " + e.getMessage());
+            return;
+        }
+
+        if (xmlBytes == null || xmlBytes.length == 0) {
+            resp.setContentType("text/html;charset=UTF-8");
+            renderImportFormPage(resp.getWriter(), "Aucun fichier XML reçu.");
+            return;
+        }
+        if (formTitle == null || formTitle.trim().isEmpty()) {
+            formTitle = FormUploadUtil.deriveTitleFromFileName(xmlFileName);
+        }
+
+        Set<String> before;
+        try {
+            before = FormSchemaUtil.listAllFormIds(conn);
+        } catch (SQLException e) {
+            resp.setContentType("text/html;charset=UTF-8");
+            renderImportFormPage(resp.getWriter(), "Erreur : " + e.getMessage());
+            return;
+        }
+
+        FormUploadUtil.UploadResult result;
+        try {
+            result = FormUploadUtil.uploadFormXml(req, xmlBytes, xmlFileName, formTitle);
+        } catch (IOException e) {
+            resp.setContentType("text/html;charset=UTF-8");
+            renderImportFormPage(resp.getWriter(), "Échec de la connexion vers l'import ODK : " + e.getMessage());
+            return;
+        }
+
+        if (result.isSuccess()) {
+            try {
+                Set<String> after = FormSchemaUtil.listAllFormIds(conn);
+                after.removeAll(before);
+                if (after.size() == 1) {
+                    resp.sendRedirect("editSubmission?formId=" + urlEncode(after.iterator().next()) + "&created=1");
+                } else {
+                    resp.sendRedirect("editSubmission");
+                }
+            } catch (SQLException e) {
+                resp.sendRedirect("editSubmission");
+            }
+            return;
+        }
+
+        resp.setContentType("text/html;charset=UTF-8");
+        String message = result.body == null || result.body.trim().isEmpty()
+                ? "Échec de l'import (code " + result.status + ")."
+                : result.body.trim();
+        if (message.length() > 500) {
+            message = message.substring(0, 500);
+        }
+        renderImportFormPage(resp.getWriter(), message);
+    }
+
+    private void renderSubmissionList(Connection conn, PrintWriter out, String formId, int offset, String notice)
+            throws SQLException {
         writeHeader(out, "Soumissions — " + formId);
         out.println("<p class='back-link'><a href='editSubmission'>&laquo; Formulaires</a></p>");
+        if (notice != null) {
+            out.println("<p class='success'>" + htmlEscape(notice) + "</p>");
+        }
 
         String modelUri = resolveSubmissionDataModelUri(conn, formId);
         String coreTable = modelUri == null ? null : resolveCoreTable(conn, modelUri);
@@ -400,10 +523,16 @@ public class EditSubmissionServlet extends HttpServlet {
         }
 
         out.println("<div class='toolbar'>");
-        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=new'>+ Nouvelle soumission</a>");
-        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=csv'>Importer CSV</a>");
-        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=map'>Carte</a>");
-        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=exportAll'>Télécharger tout (CSV)</a>");
+        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=new'>" + ICON_PLUS
+                + " Nouvelle soumission</a>");
+        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=csv'>" + ICON_UPLOAD
+                + " Importer CSV</a>");
+        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=map'>" + ICON_MAP
+                + " Carte</a>");
+        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=exportAll'>" + ICON_DOWNLOAD
+                + " Télécharger tout (CSV)</a>");
+        out.println("<a class='btn-link' href='formXml?formId=" + urlEncode(formId) + "'>" + ICON_DOWNLOAD
+                + " Télécharger le formulaire (XML)</a>");
         out.println("</div>");
 
         out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=exportSelected'>");
@@ -423,13 +552,20 @@ public class EditSubmissionServlet extends HttpServlet {
                             + "'></td><td>" + htmlEscape(rowUri) + "</td><td>"
                             + htmlEscape(subDate == null ? "" : subDate.toString()) + "</td><td>"
                             + "<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(rowUri)
-                            + "'>Modifier</a></td></tr>");
+                            + "'>" + ICON_EDIT + " Modifier</a> "
+                            + "<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(rowUri)
+                            + "&action=delete'>" + ICON_TRASH + " Supprimer</a></td></tr>");
                 }
             }
         }
         out.println("</table>");
         if (rowCount > 0) {
-            out.println("<div class='actions'><button type='submit'>Télécharger la sélection (CSV)</button></div>");
+            out.println("<div class='actions'>"
+                    + "<button type='submit' formaction='editSubmission?formId=" + urlEncode(formId)
+                    + "&action=exportSelected'>" + ICON_DOWNLOAD + " Télécharger la sélection (CSV)</button> "
+                    + "<button type='submit' class='danger' formaction='editSubmission?formId=" + urlEncode(formId)
+                    + "&action=deleteSelectedConfirm'>" + ICON_TRASH + " Supprimer la sélection</button>"
+                    + "</div>");
         }
         out.println("</form>");
         out.println("<script>document.getElementById('selAll').addEventListener('change', function() {"
@@ -485,6 +621,10 @@ public class EditSubmissionServlet extends HttpServlet {
             out.println("<p class='success'>Soumission créée avec succès.</p>");
         }
         out.println("<p class='info'>_URI : " + htmlEscape(uri) + "</p>");
+        out.println("<div class='toolbar'>");
+        out.println("<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(uri)
+                + "&action=delete'>" + ICON_TRASH + " Supprimer cette soumission</a>");
+        out.println("</div>");
 
         out.println("<div class='card'>");
         out.println("<form method='post' action='editSubmission'>");
@@ -510,6 +650,91 @@ public class EditSubmissionServlet extends HttpServlet {
         out.println("</form>");
         out.println("</div>");
         writeFooter(out);
+    }
+
+    // ---- Suppression (une soumission ou une selection) ------------------------------------------
+
+    private void renderDeleteConfirm(Connection conn, PrintWriter out, String formId, String uri, String error)
+            throws SQLException {
+        writeHeader(out, "Supprimer la soumission");
+        out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                + "'>&laquo; Liste des soumissions</a></p>");
+        if (error != null) {
+            out.println("<p class='err'>Erreur : " + htmlEscape(error) + "</p>");
+        }
+        out.println("<div class='card'>");
+        out.println("<p>Voulez-vous vraiment supprimer la soumission <strong>" + htmlEscape(uri) + "</strong> ? "
+                + "Cette action est irréversible.</p>");
+        out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=deleteConfirm'>");
+        out.println("<input type='hidden' name='uri' value='" + htmlEscape(uri) + "'>");
+        out.println("<div class='actions'><button type='submit' class='danger'>" + ICON_TRASH + " Supprimer définitivement</button></div>");
+        out.println("</form>");
+        out.println("</div>");
+        writeFooter(out);
+    }
+
+    private void renderDeleteConfirmMultiple(PrintWriter out, String formId, String[] uris, String error) {
+        writeHeader(out, "Supprimer des soumissions");
+        out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                + "'>&laquo; Liste des soumissions</a></p>");
+        if (error != null) {
+            out.println("<p class='err'>Erreur : " + htmlEscape(error) + "</p>");
+        }
+        out.println("<div class='card'>");
+        if (uris == null || uris.length == 0) {
+            out.println("<p class='info'>Aucune soumission sélectionnée.</p>");
+            out.println("</div>");
+            writeFooter(out);
+            return;
+        }
+        out.println("<p>Voulez-vous vraiment supprimer ces <strong>" + uris.length + "</strong> soumission(s) ? "
+                + "Cette action est irréversible.</p>");
+        out.println("<ul class='list'>");
+        for (String u : uris) {
+            out.println("<li>" + htmlEscape(u) + "</li>");
+        }
+        out.println("</ul>");
+        out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=deleteSelected'>");
+        for (String u : uris) {
+            out.println("<input type='hidden' name='uri' value='" + htmlEscape(u) + "'>");
+        }
+        out.println("<div class='actions'><button type='submit' class='danger'>" + ICON_TRASH + " Supprimer définitivement</button></div>");
+        out.println("</form>");
+        out.println("</div>");
+        writeFooter(out);
+    }
+
+    private void deleteSubmission(Connection conn, String formId, String uri) throws SQLException {
+        String coreTable = resolveCoreTableOrThrow(conn, formId);
+        String sql = "DELETE FROM odk_prod.\"" + coreTable + "\" WHERE \"_URI\" = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, uri);
+            int deleted = ps.executeUpdate();
+            if (deleted == 0) {
+                throw new SQLException("Aucune soumission supprimée pour _URI=" + uri);
+            }
+        }
+    }
+
+    private int deleteSubmissions(Connection conn, String formId, String[] uris) throws SQLException {
+        if (uris == null || uris.length == 0) {
+            return 0;
+        }
+        String coreTable = resolveCoreTableOrThrow(conn, formId);
+        StringBuilder placeholders = new StringBuilder();
+        for (int i = 0; i < uris.length; i++) {
+            if (i > 0) {
+                placeholders.append(',');
+            }
+            placeholders.append('?');
+        }
+        String sql = "DELETE FROM odk_prod.\"" + coreTable + "\" WHERE \"_URI\" IN (" + placeholders + ")";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (int i = 0; i < uris.length; i++) {
+                ps.setString(i + 1, uris[i]);
+            }
+            return ps.executeUpdate();
+        }
     }
 
     private static String inputTypeFor(String sqlType) {
@@ -668,7 +893,7 @@ public class EditSubmissionServlet extends HttpServlet {
             }
         }
         out.println("</div>");
-        out.println("<div class='actions'><button type='submit'>Créer la soumission</button></div>");
+        out.println("<div class='actions'><button type='submit'>" + ICON_PLUS + " Créer la soumission</button></div>");
         out.println("</form>");
         out.println("</div>");
         writeFooter(out);
@@ -731,7 +956,7 @@ public class EditSubmissionServlet extends HttpServlet {
         out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId)
                 + "&action=csvUpload' enctype='multipart/form-data'>");
         out.println("<p><input type='file' name='csvFile' accept='.csv,text/csv' required></p>");
-        out.println("<div class='actions'><button type='submit'>Importer</button></div>");
+        out.println("<div class='actions'><button type='submit'>" + ICON_UPLOAD + " Importer</button></div>");
         out.println("</form>");
         out.println("</div>");
         writeFooter(out);

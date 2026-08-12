@@ -5,6 +5,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Resolution du schema ODK (formId -> table "core" contenant les soumissions)
@@ -97,5 +99,17 @@ public final class FormSchemaUtil {
             rs.next();
             return new SubmissionStats(rs.getLong(1), rs.getTimestamp(2));
         }
+    }
+
+    /** Tous les formId connus d'ODK - sert a detecter, par difference avant/apres, le formulaire cree par un import. */
+    public static Set<String> listAllFormIds(Connection conn) throws SQLException {
+        String sql = "SELECT \"SUBMISSION_FORM_ID\" FROM odk_prod.\"_form_info_submission_association\"";
+        Set<String> ids = new HashSet<String>();
+        try (PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                ids.add(rs.getString(1));
+            }
+        }
+        return ids;
     }
 }

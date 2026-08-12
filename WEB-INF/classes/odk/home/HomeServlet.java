@@ -2,6 +2,10 @@ package odk.home;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -10,7 +14,11 @@ import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.sql.DataSource;
 
+import org.opendatakit.aggregate.ContextFactory;
+import org.opendatakit.common.security.server.SecurityServiceUtil;
+import org.opendatakit.common.web.CallingContext;
 import org.springframework.security.access.hierarchicalroles.RoleHierarchy;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
@@ -19,11 +27,12 @@ import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
 /**
- * Portail /home : point d'entree central listant les outils internes
- * (edition de soumissions aujourd'hui, futures fonctionnalites ensuite).
- * L'acces a /home lui-meme est restreint a ROLE_DATA_OWNER (voir
+ * Portail /home : tableau de bord central listant les outils internes et un
+ * recapitulatif chiffre (projets, formulaires, utilisateurs). L'acces a
+ * /home lui-meme est restreint a ROLE_DATA_OWNER (voir
  * applicationContext-security.xml) ; chaque MenuItem peut en plus exiger
- * un role supplementaire pour n'apparaitre qu'aux utilisateurs concernes.
+ * un role supplementaire pour n'apparaitre qu'aux utilisateurs concernes -
+ * la statistique "Utilisateurs" suit la meme regle (ROLE_SITE_ACCESS_ADMIN).
  */
 public class HomeServlet extends HttpServlet {
 
@@ -32,32 +41,73 @@ public class HomeServlet extends HttpServlet {
         final String description;
         final String url;
         final String requiredRole;
+        final String icon;
 
-        MenuItem(String title, String description, String url, String requiredRole) {
+        MenuItem(String title, String description, String url, String requiredRole, String icon) {
             this.title = title;
             this.description = description;
             this.url = url;
             this.requiredRole = requiredRole;
+            this.icon = icon;
         }
     }
+
+    private static final String ICON_EDIT =
+            "<svg viewBox='0 0 24 24'><path d='M4 20h4L18.5 9.5a2.121 2.121 0 0 0-3-3L5 17v3z'/><path d='M13.5 6.5l4 4'/></svg>";
+    private static final String ICON_FOLDER =
+            "<svg viewBox='0 0 24 24'><path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z'/></svg>";
+    private static final String ICON_USERS =
+            "<svg viewBox='0 0 24 24'><circle cx='9' cy='8' r='3.2'/><path d='M3.5 20c0-3.3 2.6-6 6-6s6 2.7 6 6'/>"
+            + "<circle cx='17.5' cy='9' r='2.6'/><path d='M15.8 14.3c2.6.4 4.7 2.6 4.7 5.7'/></svg>";
+    private static final String ICON_SHIELD =
+            "<svg viewBox='0 0 24 24'><path d='M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z'/><path d='M9 12l2 2 4-4'/></svg>";
+    private static final String ICON_GRID =
+            "<svg viewBox='0 0 24 24'><rect x='3' y='3' width='7' height='7' rx='1.2'/><rect x='14' y='3' width='7' height='7' rx='1.2'/>"
+            + "<rect x='3' y='14' width='7' height='7' rx='1.2'/><rect x='14' y='14' width='7' height='7' rx='1.2'/></svg>";
+    private static final String ICON_FILE =
+            "<svg viewBox='0 0 24 24'><path d='M6 3h8l4 4v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z'/>"
+            + "<path d='M14 3v4h4'/><path d='M8 13h8M8 17h8M8 9h3'/></svg>";
+    private static final String ICON_UPLOAD =
+            "<svg viewBox='0 0 24 24'><path d='M12 16V4'/><path d='M7 9l5-5 5 5'/><path d='M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3'/></svg>";
 
     private static final List<MenuItem> MENU_ITEMS = new ArrayList<MenuItem>();
     static {
         MENU_ITEMS.add(new MenuItem(
+                "Ajouter un formulaire",
+                "Importer un nouveau formulaire XML dans ODK.",
+                "editSubmission?action=importForm",
+                null,
+                ICON_UPLOAD));
+        MENU_ITEMS.add(new MenuItem(
                 "Modifier une soumission",
                 "Consulter, corriger, importer (CSV) ou visualiser sur carte les soumissions d'un formulaire.",
                 "editSubmission",
-                null));
+                null,
+                ICON_EDIT));
         MENU_ITEMS.add(new MenuItem(
                 "Projets",
                 "Regrouper des formulaires par projet et suivre le nombre de soumissions de chacun.",
                 "project",
-                null));
+                null,
+                ICON_FOLDER));
+        MENU_ITEMS.add(new MenuItem(
+                "Gestion des utilisateurs",
+                "Créer des comptes et gérer leurs rôles/permissions.",
+                "manageUsers",
+                "ROLE_SITE_ACCESS_ADMIN",
+                ICON_USERS));
+        MENU_ITEMS.add(new MenuItem(
+                "Interface admin",
+                "Page récapitulative des outils réservés aux administrateurs du site.",
+                "admin",
+                "ROLE_SITE_ACCESS_ADMIN",
+                ICON_SHIELD));
         MENU_ITEMS.add(new MenuItem(
                 "Retour a l'interface Aggregate",
                 "Formulaires, permissions et administration standard d'ODK Aggregate.",
                 "Aggregate.html",
-                null));
+                null,
+                ICON_GRID));
     }
 
     private static String htmlEscape(String s) {
@@ -66,6 +116,11 @@ public class HomeServlet extends HttpServlet {
         }
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace("\"", "&quot;").replace("'", "&#39;");
+    }
+
+    private DataSource getDataSource() {
+        WebApplicationContext ctx = WebApplicationContextUtils.getWebApplicationContext(getServletContext());
+        return (DataSource) ctx.getBean("dataSource");
     }
 
     private boolean currentUserHasRole(String role) {
@@ -84,43 +139,78 @@ public class HomeServlet extends HttpServlet {
         return false;
     }
 
-    private static final String PAGE_CSS =
-            "body{margin:0;background:#f4f6f9;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2430;}"
-            + "*{box-sizing:border-box;}"
-            + ".topbar{background:#1e3a5f;color:#fff;padding:14px 24px;font-size:16px;font-weight:600;letter-spacing:.2px;}"
-            + ".container{max-width:960px;margin:24px auto;padding:0 16px 48px;}"
-            + "h2{font-size:20px;font-weight:600;margin:0 0 16px;color:#1e3a5f;}"
-            + ".info{color:#6b7280;font-size:13px;margin-bottom:20px;}"
-            + ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;}"
-            + ".card{display:block;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);"
-            + "padding:20px 24px;text-decoration:none;color:inherit;transition:box-shadow .15s,transform .15s;}"
-            + ".card:hover{box-shadow:0 4px 12px rgba(0,0,0,.12);transform:translateY(-1px);text-decoration:none;}"
-            + ".card h3{margin:0 0 8px;font-size:16px;font-weight:600;color:#1e3a5f;}"
-            + ".card p{margin:0;font-size:13px;color:#6b7280;line-height:1.4;}";
+    private static Integer countRows(Connection conn, String sql) {
+        try (PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            return null;
+        }
+        return null;
+    }
 
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+        Integer projectCount = null;
+        Integer formCount = null;
+        Integer userCount = null;
+        boolean showUserCount = currentUserHasRole("ROLE_SITE_ACCESS_ADMIN");
+
+        try (Connection conn = getDataSource().getConnection()) {
+            projectCount = countRows(conn, "SELECT COUNT(*) FROM odk_prod.app_project");
+            formCount = countRows(conn, "SELECT COUNT(*) FROM odk_prod.\"_form_info_submission_association\" "
+                    + "WHERE \"IS_SUBMISSION_ALLOWED\" = true AND \"URI_SUBMISSION_DATA_MODEL\" IS NOT NULL");
+        } catch (SQLException e) {
+            // Statistiques indisponibles - le tableau de bord reste utilisable sans elles.
+        }
+        if (showUserCount) {
+            try {
+                CallingContext cc = ContextFactory.getCallingContext(this, req);
+                userCount = SecurityServiceUtil.getAllUsers(true, cc).size();
+            } catch (Exception e) {
+                userCount = null;
+            }
+        }
+
         resp.setContentType("text/html;charset=UTF-8");
         PrintWriter out = resp.getWriter();
         out.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
         out.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
-        out.println("<title>ODK Tiipaalga - Menu</title>");
-        out.println("<style>" + PAGE_CSS + "</style>");
+        out.println("<title>ODK Tiipaalga - Tableau de bord</title>");
+        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css'>");
         out.println("</head><body>");
-        out.println("<div class='topbar'>ODK Tiipaalga &middot; Menu</div>");
+        out.println("<div class='topbar'>ODK Tiipaalga &middot; Tableau de bord</div>");
         out.println("<div class='container'>");
         out.println("<h2>Que voulez-vous faire ?</h2>");
-        out.println("<p class='info'>Choisissez un outil ci-dessous.</p>");
+        out.println("<p class='info'>Vue d'ensemble et outils disponibles.</p>");
+
+        out.println("<div class='stats'>");
+        out.println(statTile(ICON_FOLDER, projectCount, "Projet(s)"));
+        out.println(statTile(ICON_FILE, formCount, "Formulaire(s)"));
+        if (showUserCount) {
+            out.println(statTile(ICON_USERS, userCount, "Utilisateur(s)"));
+        }
+        out.println("</div>");
+
         out.println("<div class='grid'>");
         for (MenuItem item : MENU_ITEMS) {
             if (item.requiredRole != null && !currentUserHasRole(item.requiredRole)) {
                 continue;
             }
             out.println("<a class='card' href='" + htmlEscape(item.url) + "'>"
+                    + "<div class='icon-badge'>" + item.icon + "</div>"
                     + "<h3>" + htmlEscape(item.title) + "</h3>"
                     + "<p>" + htmlEscape(item.description) + "</p></a>");
         }
         out.println("</div>");
         out.println("</div></body></html>");
+    }
+
+    private static String statTile(String icon, Integer value, String label) {
+        String display = value == null ? "—" : String.valueOf(value);
+        return "<div class='stat'><div class='stat-icon'>" + icon + "</div>"
+                + "<div><div class='stat-value'>" + display + "</div>"
+                + "<div class='stat-label'>" + htmlEscape(label) + "</div></div></div>";
     }
 }

@@ -52,6 +52,8 @@
 		<intercept-url pattern="/editSubmission" access="isFullyAuthenticated() and hasRole('ROLE_DATA_OWNER')" />
 		<intercept-url pattern="/home" access="isFullyAuthenticated() and hasRole('ROLE_DATA_OWNER')" />
 		<intercept-url pattern="/project" access="isFullyAuthenticated() and hasRole('ROLE_DATA_OWNER')" />
+		<intercept-url pattern="/manageUsers" access="isFullyAuthenticated() and hasRole('ROLE_SITE_ACCESS_ADMIN')" />
+		<intercept-url pattern="/admin" access="isFullyAuthenticated() and hasRole('ROLE_SITE_ACCESS_ADMIN')" />
 
 		<intercept-url pattern="/aggregateui/formadminservice" access="hasRole('ROLE_DATA_OWNER')" />
 		<intercept-url pattern="/aggregateui/servicesadminservice" access="hasRole('ROLE_DATA_OWNER')" />

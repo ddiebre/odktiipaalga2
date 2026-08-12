@@ -12,7 +12,7 @@ if not exist "%SERVLET_JAR%" (
 cd /d "%~dp0"
 javac -encoding UTF-8 -cp "%SERVLET_JAR%" CharResponseWrapper.java FormListUrlRewriteFilter.java
 if %ERRORLEVEL% equ 0 (
-    echo Compilation reussie. Redemarrez Tomcat puis testez https://odktiipaalga.ngrok.app/ODKTiipaalga2/formList
+    echo Compilation reussie. Redemarrez Tomcat puis testez https://hdstiipaalga.ngrok.app/ODKTiipaalga2/formList
 ) else (
     echo Echec de la compilation.
     exit /b 1

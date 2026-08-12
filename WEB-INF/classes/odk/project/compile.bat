@@ -17,7 +17,7 @@ if %ERRORLEVEL% neq 0 exit /b 1
 cd /d "%~dp0"
 javac -encoding UTF-8 -cp "%SERVLET_JAR%;%LIB_DIR%\*;%CLASSES_DIR%" ProjectServlet.java
 if %ERRORLEVEL% equ 0 (
-    echo Compilation reussie. Redemarrez Tomcat puis testez https://odktiipaalga.ngrok.app/ODKTiipaalga2/project
+    echo Compilation reussie. Redemarrez Tomcat puis testez https://hdstiipaalga.ngrok.app/ODKTiipaalga2/project
 ) else (
     echo Echec de la compilation.
     exit /b 1

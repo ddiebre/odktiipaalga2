@@ -9,9 +9,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 
 import javax.servlet.ServletException;
@@ -23,20 +21,12 @@ import javax.sql.DataSource;
 import org.apache.commons.fileupload.FileItem;
 import org.apache.commons.fileupload.disk.DiskFileItemFactory;
 import org.apache.commons.fileupload.servlet.ServletFileUpload;
-import org.apache.http.HttpEntity;
-import org.apache.http.client.config.RequestConfig;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.entity.ContentType;
-import org.apache.http.entity.mime.MultipartEntityBuilder;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
-import org.apache.http.util.EntityUtils;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
 import odk.common.FormSchemaUtil;
+import odk.common.FormUploadUtil;
 
 /**
  * Admin-only tool (see /project intercept-url, ROLE_DATA_OWNER) regroupant des
@@ -123,56 +113,22 @@ public class ProjectServlet extends HttpServlet {
         return FormSchemaUtil.urlEncode(s);
     }
 
-    private static final String PAGE_CSS =
-            "body{margin:0;background:#f4f6f9;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2430;}"
-            + "*{box-sizing:border-box;}"
-            + ".topbar{background:#1e3a5f;color:#fff;padding:14px 24px;font-size:16px;font-weight:600;letter-spacing:.2px;}"
-            + ".topbar-link{color:#fff;text-decoration:none;opacity:.85;}"
-            + ".topbar-link:hover{opacity:1;text-decoration:underline;}"
-            + ".container{max-width:960px;margin:24px auto;padding:0 16px 48px;}"
-            + "h2{font-size:20px;font-weight:600;margin:0 0 16px;color:#1e3a5f;}"
-            + ".card{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);padding:20px 24px;margin-bottom:16px;}"
-            + "a{color:#2563eb;text-decoration:none;}"
-            + "a:hover{text-decoration:underline;}"
-            + ".back-link{display:inline-block;margin-bottom:14px;font-size:13px;}"
-            + "table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);}"
-            + "th,td{text-align:left;padding:10px 14px;border-bottom:1px solid #eef0f3;font-size:14px;}"
-            + "th{background:#f0f3f8;font-weight:600;color:#374151;}"
-            + "tr:last-child td{border-bottom:none;}"
-            + "tr:hover td{background:#f8fafc;}"
-            + "ul.list{list-style:none;padding:0;margin:0;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);overflow:hidden;}"
-            + "ul.list li{border-bottom:1px solid #eef0f3;padding:14px 16px;}"
-            + "ul.list li:last-child{border-bottom:none;}"
-            + "ul.list li a{display:block;}"
-            + "ul.list li .muted{color:#6b7280;font-size:13px;margin-top:2px;}"
-            + ".form-grid{display:grid;grid-template-columns:160px 1fr;gap:12px 16px;align-items:start;}"
-            + "label{font-weight:600;font-size:13px;color:#374151;}"
-            + "input[type=text],textarea{width:100%;max-width:480px;padding:7px 10px;"
-            + "border:1px solid #d1d5db;border-radius:6px;font-size:14px;font-family:inherit;}"
-            + "textarea{min-height:80px;resize:vertical;}"
-            + "input:focus,textarea:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.15);}"
-            + "button{background:#2563eb;color:#fff;border:none;padding:9px 22px;border-radius:6px;font-size:14px;"
-            + "font-weight:600;cursor:pointer;}"
-            + "button:hover{background:#1d4ed8;}"
-            + "button.danger{background:#dc2626;}"
-            + "button.danger:hover{background:#b91c1c;}"
-            + ".err{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;padding:10px 14px;border-radius:6px;"
-            + "margin-bottom:14px;font-size:14px;}"
-            + ".success{background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;padding:10px 14px;border-radius:6px;"
-            + "margin-bottom:14px;font-size:14px;}"
-            + ".info{color:#6b7280;font-size:13px;margin-bottom:14px;}"
-            + ".btn-link{display:inline-block;padding:5px 12px;background:#eef2ff;color:#2563eb;border-radius:5px;font-size:13px;"
-            + "border:none;cursor:pointer;}"
-            + ".btn-link:hover{background:#e0e7ff;text-decoration:none;}"
-            + ".actions{margin-top:18px;}"
-            + ".toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;}"
-            + "form.inline{display:inline;}";
+    private static final String ICON_PLUS = "<svg viewBox='0 0 24 24'><path d='M12 5v14M5 12h14'/></svg>";
+    private static final String ICON_EDIT =
+            "<svg viewBox='0 0 24 24'><path d='M4 20h4L18.5 9.5a2.121 2.121 0 0 0-3-3L5 17v3z'/><path d='M13.5 6.5l4 4'/></svg>";
+    private static final String ICON_TRASH =
+            "<svg viewBox='0 0 24 24'><path d='M4 7h16'/><path d='M9 7V4h6v3'/>"
+            + "<path d='M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13'/><path d='M10 11v6M14 11v6'/></svg>";
+    private static final String ICON_UPLOAD =
+            "<svg viewBox='0 0 24 24'><path d='M12 16V4'/><path d='M7 9l5-5 5 5'/><path d='M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3'/></svg>";
+    private static final String ICON_DOWNLOAD =
+            "<svg viewBox='0 0 24 24'><path d='M12 4v12'/><path d='M7 11l5 5 5-5'/><path d='M4 20h16'/></svg>";
 
     private void writeHeader(PrintWriter out, String title) {
         out.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
         out.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
         out.println("<title>" + htmlEscape(title) + "</title>");
-        out.println("<style>" + PAGE_CSS + "</style>");
+        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css'>");
         out.println("</head><body>");
         out.println("<div class='topbar'><a href='home' class='topbar-link'>&laquo; Menu</a> &middot; ODK Tiipaalga &middot; Projets</div>");
         out.println("<div class='container'>");
@@ -411,34 +367,7 @@ public class ProjectServlet extends HttpServlet {
         }
     }
 
-    private static Set<String> listAllFormIds(Connection conn) throws SQLException {
-        String sql = "SELECT \"SUBMISSION_FORM_ID\" FROM odk_prod.\"_form_info_submission_association\"";
-        Set<String> ids = new HashSet<String>();
-        try (PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                ids.add(rs.getString(1));
-            }
-        }
-        return ids;
-    }
-
     // ---- Import direct d'un formulaire XML (delegue a l'endpoint ODK existant /formUpload) ----
-
-    private static String deriveTitleFromFileName(String fileName) {
-        if (fileName == null) {
-            return "Formulaire importé";
-        }
-        String name = fileName;
-        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
-        if (slash >= 0) {
-            name = name.substring(slash + 1);
-        }
-        if (name.toLowerCase(Locale.ROOT).endsWith(".xml")) {
-            name = name.substring(0, name.length() - 4);
-        }
-        name = name.replace('_', ' ').replace('-', ' ').trim();
-        return name.isEmpty() ? "Formulaire importé" : name;
-    }
 
     /**
      * Delegue la creation du formulaire a l'endpoint ODK existant (/formUpload,
@@ -477,41 +406,22 @@ public class ProjectServlet extends HttpServlet {
             return;
         }
         if (formTitle == null || formTitle.trim().isEmpty()) {
-            formTitle = deriveTitleFromFileName(xmlFileName);
+            formTitle = FormUploadUtil.deriveTitleFromFileName(xmlFileName);
         }
 
-        Set<String> before = listAllFormIds(conn);
+        Set<String> before = FormSchemaUtil.listAllFormIds(conn);
 
-        int status;
-        String responseBody;
+        FormUploadUtil.UploadResult result;
         try {
-            String uploadUrl = req.getScheme() + "://127.0.0.1:" + req.getLocalPort() + req.getContextPath() + "/formUpload";
-            RequestConfig config = RequestConfig.custom().setConnectTimeout(15000).setSocketTimeout(15000).build();
-            try (CloseableHttpClient client = HttpClients.custom().setDefaultRequestConfig(config).build()) {
-                HttpPost post = new HttpPost(uploadUrl);
-                String cookie = req.getHeader("Cookie");
-                if (cookie != null) {
-                    post.setHeader("Cookie", cookie);
-                }
-                HttpEntity entity = MultipartEntityBuilder.create()
-                        .addBinaryBody("form_def_file", xmlBytes, ContentType.APPLICATION_XML,
-                                xmlFileName != null ? xmlFileName : "form.xml")
-                        .addTextBody("form_name", formTitle, ContentType.TEXT_PLAIN.withCharset("UTF-8"))
-                        .build();
-                post.setEntity(entity);
-                try (CloseableHttpResponse httpResp = client.execute(post)) {
-                    status = httpResp.getStatusLine().getStatusCode();
-                    responseBody = httpResp.getEntity() != null ? EntityUtils.toString(httpResp.getEntity(), "UTF-8") : "";
-                }
-            }
+            result = FormUploadUtil.uploadFormXml(req, xmlBytes, xmlFileName, formTitle);
         } catch (IOException e) {
             resp.setContentType("text/html;charset=UTF-8");
             renderImportXmlForm(resp.getWriter(), project, "Échec de la connexion vers l'import ODK : " + e.getMessage());
             return;
         }
 
-        if (status == 201) {
-            Set<String> after = listAllFormIds(conn);
+        if (result.isSuccess()) {
+            Set<String> after = FormSchemaUtil.listAllFormIds(conn);
             after.removeAll(before);
             if (after.size() == 1) {
                 String newFormId = after.iterator().next();
@@ -522,9 +432,9 @@ public class ProjectServlet extends HttpServlet {
             }
         } else {
             resp.setContentType("text/html;charset=UTF-8");
-            String message = responseBody == null || responseBody.trim().isEmpty()
-                    ? "Échec de l'import (code " + status + ")."
-                    : responseBody.trim();
+            String message = result.body == null || result.body.trim().isEmpty()
+                    ? "Échec de l'import (code " + result.status + ")."
+                    : result.body.trim();
             if (message.length() > 500) {
                 message = message.substring(0, 500);
             }
@@ -536,7 +446,7 @@ public class ProjectServlet extends HttpServlet {
 
     private void renderProjectList(Connection conn, PrintWriter out) throws SQLException {
         writeHeader(out, "Projets");
-        out.println("<div class='toolbar'><a class='btn-link' href='project?action=new'>+ Nouveau projet</a></div>");
+        out.println("<div class='toolbar'><a class='btn-link' href='project?action=new'>" + ICON_PLUS + " Nouveau projet</a></div>");
         List<ProjectSummary> projects = listProjects(conn);
         if (projects.isEmpty()) {
             out.println("<p class='info'>Aucun projet pour le moment.</p>");
@@ -570,7 +480,8 @@ public class ProjectServlet extends HttpServlet {
         out.println("<label>Description</label><textarea name='description'>"
                 + htmlEscape(editing && project.description != null ? project.description : "") + "</textarea>");
         out.println("</div>");
-        out.println("<div class='actions'><button type='submit'>" + (editing ? "Enregistrer" : "Créer le projet") + "</button></div>");
+        out.println("<div class='actions'><button type='submit'>" + (editing ? "Enregistrer" : ICON_PLUS + " Créer le projet")
+                + "</button></div>");
         out.println("</form>");
         out.println("</div>");
         writeFooter(out);
@@ -590,10 +501,13 @@ public class ProjectServlet extends HttpServlet {
             out.println("<p class='info'>" + htmlEscape(project.description) + "</p>");
         }
         out.println("<div class='toolbar'>");
-        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=edit'>Modifier</a>");
-        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=addForm'>+ Ajouter un formulaire</a>");
-        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=importXml'>Importer un formulaire XML</a>");
-        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=delete'>Supprimer le projet</a>");
+        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=edit'>" + ICON_EDIT + " Modifier</a>");
+        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=addForm'>" + ICON_PLUS
+                + " Ajouter un formulaire</a>");
+        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=importXml'>" + ICON_UPLOAD
+                + " Importer un formulaire XML</a>");
+        out.println("<a class='btn-link danger' href='project?projectId=" + project.id + "&action=delete'>" + ICON_TRASH
+                + " Supprimer le projet</a>");
         out.println("</div>");
 
         List<String> formIds = listAttachedForms(conn, project.id);
@@ -612,9 +526,12 @@ public class ProjectServlet extends HttpServlet {
                     out.println("<td>" + htmlEscape(formId) + "</td>");
                     out.println("<td class='err' colspan='2'>Formulaire introuvable (peut-être supprimé)</td>");
                 }
-                out.println("<td><form class='inline' method='post' action='project?projectId=" + project.id + "&action=removeForm'>"
+                out.println("<td><div class='row-actions'>"
+                        + "<a class='btn-link' href='formXml?formId=" + urlEncode(formId) + "'>" + ICON_DOWNLOAD + " XML</a>"
+                        + "<form class='inline' method='post' action='project?projectId=" + project.id + "&action=removeForm'>"
                         + "<input type='hidden' name='formId' value='" + htmlEscape(formId) + "'>"
-                        + "<button type='submit' class='btn-link'>Retirer</button></form></td>");
+                        + "<button type='submit' class='btn-link danger'>" + ICON_TRASH + " Retirer</button></form>"
+                        + "</div></td>");
                 out.println("</tr>");
             }
             out.println("</table>");
@@ -635,7 +552,7 @@ public class ProjectServlet extends HttpServlet {
                         + "<span>" + htmlEscape(formId) + "</span>"
                         + "<form class='inline' method='post' action='project?projectId=" + project.id + "&action=addForm'>"
                         + "<input type='hidden' name='formId' value='" + htmlEscape(formId) + "'>"
-                        + "<button type='submit' class='btn-link'>Ajouter</button></form></li>");
+                        + "<button type='submit' class='btn-link'>" + ICON_PLUS + " Ajouter</button></form></li>");
             }
             out.println("</ul>");
         }
@@ -657,7 +574,7 @@ public class ProjectServlet extends HttpServlet {
         out.println("<label>Titre</label><input type='text' name='formTitle' "
                 + "placeholder='(facultatif, déduit du nom de fichier si vide)'>");
         out.println("</div>");
-        out.println("<div class='actions'><button type='submit'>Importer</button></div>");
+        out.println("<div class='actions'><button type='submit'>" + ICON_UPLOAD + " Importer</button></div>");
         out.println("</form>");
         out.println("</div>");
         writeFooter(out);
@@ -672,7 +589,7 @@ public class ProjectServlet extends HttpServlet {
                 + "Cette action retirera aussi son association avec " + formCount + " formulaire(s) "
                 + "(les soumissions elles-mêmes ne sont pas supprimées).</p>");
         out.println("<form method='post' action='project?projectId=" + project.id + "&action=deleteConfirm'>");
-        out.println("<div class='actions'><button type='submit' class='danger'>Supprimer définitivement</button></div>");
+        out.println("<div class='actions'><button type='submit' class='danger'>" + ICON_TRASH + " Supprimer définitivement</button></div>");
         out.println("</form>");
         out.println("</div>");
         writeFooter(out);
