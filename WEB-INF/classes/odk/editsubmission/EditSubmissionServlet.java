@@ -2,6 +2,7 @@ package odk.editsubmission;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.io.StringReader;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -11,7 +12,11 @@ import java.sql.Timestamp;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.fileupload.FileItem;
@@ -23,13 +28,21 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.sql.DataSource;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
 
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.InputSource;
 
 import odk.common.FormSchemaUtil;
 import odk.common.FormUploadUtil;
+import odk.common.XlsFormConverter;
 
 /**
  * Admin-only tool (see /editSubmission intercept-url, ROLE_DATA_OWNER) to edit
@@ -274,6 +287,8 @@ public class EditSubmissionServlet extends HttpServlet {
             PrintWriter out = resp.getWriter();
             if (formId == null && "importForm".equals(action)) {
                 renderImportFormPage(out, null);
+            } else if (formId == null && "importXlsForm".equals(action)) {
+                renderImportXlsFormPage(out, null);
             } else if (formId == null) {
                 renderFormList(conn, out);
             } else if ("new".equals(action)) {
@@ -311,6 +326,18 @@ public class EditSubmissionServlet extends HttpServlet {
         try (Connection conn = getDataSource().getConnection()) {
             if ("importForm".equals(action)) {
                 handleImportForm(conn, req, resp);
+                return;
+            }
+            if ("importXlsForm".equals(action)) {
+                handleImportXlsForm(req, resp);
+                return;
+            }
+            if ("downloadConvertedXml".equals(action)) {
+                streamConvertedXml(req, resp);
+                return;
+            }
+            if ("deployConvertedXml".equals(action)) {
+                handleDeployConvertedXml(conn, req, resp);
                 return;
             }
             if ("exportSelected".equals(action)) {
@@ -392,8 +419,12 @@ public class EditSubmissionServlet extends HttpServlet {
     private void renderFormList(Connection conn, PrintWriter out) throws SQLException {
         writeHeader(out, "Choisir un formulaire");
         out.println("<p class='info'>Sélectionnez le formulaire dont vous voulez modifier une soumission.</p>");
-        out.println("<div class='toolbar'><a class='btn-link' href='editSubmission?action=importForm'>" + ICON_UPLOAD
-                + " Importer un formulaire XML</a></div>");
+        out.println("<div class='toolbar'>");
+        out.println("<a class='btn-link' href='editSubmission?action=importForm'>" + ICON_UPLOAD
+                + " Importer un formulaire XML</a>");
+        out.println("<a class='btn-link' href='editSubmission?action=importXlsForm'>" + ICON_UPLOAD
+                + " Importer un XLSForm (Excel)</a>");
+        out.println("</div>");
         out.println("<ul class='list'>");
         String sql = "SELECT \"SUBMISSION_FORM_ID\" FROM odk_prod.\"_form_info_submission_association\" "
                 + "WHERE \"IS_SUBMISSION_ALLOWED\" = true AND \"URI_SUBMISSION_DATA_MODEL\" IS NOT NULL "
@@ -506,6 +537,313 @@ public class EditSubmissionServlet extends HttpServlet {
         renderImportFormPage(resp.getWriter(), message);
     }
 
+    // ---- Import XLSForm (Excel) -> conversion en XML -> telecharger et/ou deployer --------------
+
+    private void renderImportXlsFormPage(PrintWriter out, String error) {
+        writeHeader(out, "Importer un XLSForm (Excel)");
+        out.println("<p class='back-link'><a href='editSubmission'>&laquo; Formulaires</a></p>");
+        if (error != null) {
+            out.println("<p class='err'>" + htmlEscape(error) + "</p>");
+        }
+        out.println("<div class='card'>");
+        out.println("<p class='info'>Le fichier Excel (XLSForm) sera converti en XML. Vous pourrez ensuite "
+                + "télécharger ce XML et/ou le déployer dans ODK, séparément.</p>");
+        out.println("<form method='post' action='editSubmission?action=importXlsForm' enctype='multipart/form-data'>");
+        out.println("<div class='form-grid'>");
+        out.println("<label>Fichier Excel</label><input type='file' name='xlsFile' "
+                + "accept='.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' required>");
+        out.println("</div>");
+        out.println("<div class='actions'><button type='submit'>" + ICON_UPLOAD + " Convertir</button></div>");
+        out.println("</form>");
+        out.println("</div>");
+        writeFooter(out);
+    }
+
+    private void handleImportXlsForm(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        byte[] xlsxBytes = null;
+        String xlsxFileName = null;
+        try {
+            if (ServletFileUpload.isMultipartContent(req)) {
+                ServletFileUpload upload = new ServletFileUpload(new DiskFileItemFactory());
+                List<FileItem> items = upload.parseRequest(req);
+                for (FileItem item : items) {
+                    if (!item.isFormField() && "xlsFile".equals(item.getFieldName())) {
+                        xlsxBytes = item.get();
+                        xlsxFileName = item.getName();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            resp.setContentType("text/html;charset=UTF-8");
+            renderImportXlsFormPage(resp.getWriter(), "Erreur de lecture du fichier : " + e.getMessage());
+            return;
+        }
+
+        if (xlsxBytes == null || xlsxBytes.length == 0) {
+            resp.setContentType("text/html;charset=UTF-8");
+            renderImportXlsFormPage(resp.getWriter(), "Aucun fichier Excel reçu.");
+            return;
+        }
+
+        XlsFormConverter.ConversionResult result;
+        try {
+            result = XlsFormConverter.convert(xlsxBytes);
+        } catch (IOException e) {
+            resp.setContentType("text/html;charset=UTF-8");
+            renderImportXlsFormPage(resp.getWriter(), "Erreur de conversion : " + e.getMessage());
+            return;
+        }
+
+        resp.setContentType("text/html;charset=UTF-8");
+        if (!result.success) {
+            String message = result.message == null || result.message.trim().isEmpty()
+                    ? "Échec de la conversion." : result.message.trim();
+            if (message.length() > 1000) {
+                message = message.substring(0, 1000);
+            }
+            renderImportXlsFormPage(resp.getWriter(), message);
+            return;
+        }
+        String suggestedTitle = FormUploadUtil.deriveTitleFromFileName(xlsxFileName);
+        renderXlsFormResult(resp.getWriter(), result.xmlBytes, suggestedTitle, null);
+    }
+
+    private void renderXlsFormResult(PrintWriter out, byte[] xmlBytes, String formTitle, String error) throws IOException {
+        String xmlText = new String(xmlBytes, "UTF-8");
+        writeHeader(out, "Formulaire converti");
+        out.println("<p class='back-link'><a href='editSubmission'>&laquo; Formulaires</a></p>");
+        if (error != null) {
+            out.println("<p class='err'>" + htmlEscape(error) + "</p>");
+        } else {
+            out.println("<p class='success'>Conversion réussie. Téléchargez le XML, déployez-le dans ODK, ou les deux.</p>");
+        }
+        out.println("<div class='card'>");
+        out.println("<div class='toolbar'>");
+        out.println("<form class='inline' method='post' action='editSubmission?action=downloadConvertedXml'>");
+        out.println("<input type='hidden' name='xml' value='" + htmlEscape(xmlText) + "'>");
+        out.println("<button type='submit'>" + ICON_DOWNLOAD + " Télécharger le XML</button>");
+        out.println("</form>");
+        out.println("<form class='inline' method='post' action='editSubmission?action=deployConvertedXml' "
+                + "style='display:flex;gap:8px;align-items:center;'>");
+        out.println("<input type='hidden' name='xml' value='" + htmlEscape(xmlText) + "'>");
+        out.println("<input type='text' name='formTitle' value='" + htmlEscape(formTitle == null ? "" : formTitle)
+                + "' placeholder='Titre du formulaire' style='max-width:220px;'>");
+        out.println("<button type='submit'>" + ICON_UPLOAD + " Déployer maintenant</button>");
+        out.println("</form>");
+        out.println("</div>");
+
+        String previewHtml = buildFormPreviewHtml(xmlBytes);
+        if (previewHtml != null) {
+            out.println("<h2 style='margin-top:24px;'>Aperçu du formulaire</h2>");
+            out.println("<p class='info'>Les champs sont désactivés (lecture seule) — c'est un aperçu, pas une vraie saisie.</p>");
+            out.println("<div class='card'><div class='form-grid'>");
+            out.println(previewHtml);
+            out.println("</div></div>");
+        }
+
+        out.println("<h2 style='margin-top:24px;'>XML généré</h2>");
+        out.println("<textarea readonly style='width:100%;min-height:220px;font-family:monospace;font-size:12px;'>"
+                + htmlEscape(xmlText) + "</textarea>");
+        out.println("</div>");
+        writeFooter(out);
+    }
+
+    private static final Set<String> PREVIEW_CONTROL_TAGS = new HashSet<String>(
+            Arrays.asList("input", "select1", "select", "upload", "trigger", "range"));
+
+    /** Aperçu simple (lecture seule) des questions d'un formulaire, construit en parcourant &lt;h:body&gt;. */
+    private static String buildFormPreviewHtml(byte[] xmlBytes) {
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            DocumentBuilder builder = factory.newDocumentBuilder();
+            Document doc = builder.parse(new InputSource(new StringReader(new String(xmlBytes, "UTF-8"))));
+
+            Map<String, String> bindTypes = new HashMap<String, String>();
+            NodeList binds = doc.getElementsByTagName("bind");
+            for (int i = 0; i < binds.getLength(); i++) {
+                Element b = (Element) binds.item(i);
+                String nodeset = b.getAttribute("nodeset");
+                String type = b.getAttribute("type");
+                if (!nodeset.isEmpty()) {
+                    bindTypes.put(nodeset, type.isEmpty() ? "string" : type);
+                }
+            }
+
+            NodeList bodyNodes = doc.getElementsByTagName("h:body");
+            if (bodyNodes.getLength() == 0) {
+                return null;
+            }
+            StringBuilder html = new StringBuilder();
+            int before = html.length();
+            appendPreviewControls(bodyNodes.item(0), bindTypes, html);
+            if (html.length() == before) {
+                return null;
+            }
+            return html.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Traduit un type de bind XForms vers le type d'input HTML le plus proche (meme esprit que inputTypeFor). */
+    private static String xformInputType(String bindType) {
+        if (bindType == null) {
+            return "text";
+        }
+        switch (bindType) {
+            case "int":
+            case "integer":
+            case "decimal":
+                return "number";
+            case "date":
+                return "date";
+            case "dateTime":
+            case "datetime":
+                return "datetime-local";
+            case "time":
+                return "time";
+            default:
+                return "text";
+        }
+    }
+
+    private static void appendPreviewControls(Node parent, Map<String, String> bindTypes, StringBuilder html) {
+        NodeList children = parent.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+            String tag = child.getNodeName();
+            Element el = (Element) child;
+            if (PREVIEW_CONTROL_TAGS.contains(tag)) {
+                String ref = el.getAttribute("ref");
+                String label = firstChildText(el, "label");
+                html.append("<label>")
+                        .append(htmlEscape(label == null || label.trim().isEmpty() ? "(sans libellé)" : label))
+                        .append("</label>");
+                if ("select1".equals(tag) || "select".equals(tag)) {
+                    NodeList items = el.getElementsByTagName("item");
+                    if ("select".equals(tag)) {
+                        html.append("<div>");
+                        for (int j = 0; j < items.getLength(); j++) {
+                            String itemLabel = firstChildText((Element) items.item(j), "label");
+                            html.append("<label style='font-weight:400;display:block;margin-bottom:4px;'>"
+                                    + "<input type='checkbox' disabled> ")
+                                    .append(htmlEscape(itemLabel == null ? "" : itemLabel)).append("</label>");
+                        }
+                        html.append("</div>");
+                    } else {
+                        html.append("<select disabled><option>—</option>");
+                        for (int j = 0; j < items.getLength(); j++) {
+                            String itemLabel = firstChildText((Element) items.item(j), "label");
+                            html.append("<option>").append(htmlEscape(itemLabel == null ? "" : itemLabel)).append("</option>");
+                        }
+                        html.append("</select>");
+                    }
+                } else if ("upload".equals(tag)) {
+                    html.append("<input type='file' disabled>");
+                } else if ("trigger".equals(tag)) {
+                    html.append("<label style='font-weight:400;'><input type='checkbox' disabled> "
+                            + "<span class='muted'>Confirmation</span></label>");
+                } else if ("range".equals(tag)) {
+                    html.append("<input type='range' disabled>");
+                } else {
+                    String inputType = xformInputType(bindTypes.get(ref));
+                    html.append("<input type='").append(inputType).append("' disabled>");
+                }
+            } else if ("group".equals(tag) || "repeat".equals(tag)) {
+                String label = firstChildText(el, "label");
+                String defaultLabel = "repeat".equals(tag) ? "Groupe répété" : "Groupe";
+                html.append("<div style='grid-column:1/-1;font-weight:650;color:#16304f;"
+                        + "margin-top:12px;padding-top:12px;border-top:1px solid #eef1f6;'>")
+                        .append(htmlEscape(label == null || label.trim().isEmpty() ? defaultLabel : label));
+                if ("repeat".equals(tag)) {
+                    html.append(" <span class='muted' style='font-weight:400;'>(répétable)</span>");
+                }
+                html.append("</div>");
+                appendPreviewControls(el, bindTypes, html);
+            }
+        }
+    }
+
+    private static String firstChildText(Element parent, String childTagName) {
+        NodeList children = parent.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() == Node.ELEMENT_NODE && childTagName.equals(child.getNodeName())) {
+                return child.getTextContent();
+            }
+        }
+        return null;
+    }
+
+    private void streamConvertedXml(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        String xml = req.getParameter("xml");
+        if (xml == null) {
+            resp.sendRedirect("editSubmission");
+            return;
+        }
+        resp.setContentType("text/xml;charset=UTF-8");
+        resp.setHeader("Content-Disposition", "attachment; filename=\"formulaire.xml\"");
+        resp.getWriter().write(xml);
+    }
+
+    private void handleDeployConvertedXml(Connection conn, HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        String xml = req.getParameter("xml");
+        String formTitle = req.getParameter("formTitle");
+        if (xml == null || xml.trim().isEmpty()) {
+            resp.sendRedirect("editSubmission");
+            return;
+        }
+        if (formTitle == null || formTitle.trim().isEmpty()) {
+            formTitle = "Formulaire importé";
+        }
+        byte[] xmlBytes = xml.getBytes("UTF-8");
+
+        Set<String> before;
+        try {
+            before = FormSchemaUtil.listAllFormIds(conn);
+        } catch (SQLException e) {
+            resp.setContentType("text/html;charset=UTF-8");
+            renderXlsFormResult(resp.getWriter(), xmlBytes, formTitle, "Erreur : " + e.getMessage());
+            return;
+        }
+
+        FormUploadUtil.UploadResult result;
+        try {
+            result = FormUploadUtil.uploadFormXml(req, xmlBytes, "formulaire.xml", formTitle);
+        } catch (IOException e) {
+            resp.setContentType("text/html;charset=UTF-8");
+            renderXlsFormResult(resp.getWriter(), xmlBytes, formTitle, "Échec de la connexion vers l'import ODK : " + e.getMessage());
+            return;
+        }
+
+        if (result.isSuccess()) {
+            try {
+                Set<String> after = FormSchemaUtil.listAllFormIds(conn);
+                after.removeAll(before);
+                if (after.size() == 1) {
+                    resp.sendRedirect("editSubmission?formId=" + urlEncode(after.iterator().next()) + "&created=1");
+                } else {
+                    resp.sendRedirect("editSubmission");
+                }
+            } catch (SQLException e) {
+                resp.sendRedirect("editSubmission");
+            }
+            return;
+        }
+
+        resp.setContentType("text/html;charset=UTF-8");
+        String message = result.body == null || result.body.trim().isEmpty()
+                ? "Échec du déploiement (code " + result.status + ")."
+                : result.body.trim();
+        if (message.length() > 500) {
+            message = message.substring(0, 500);
+        }
+        renderXlsFormResult(resp.getWriter(), xmlBytes, formTitle, message);
+    }
+
     private void renderSubmissionList(Connection conn, PrintWriter out, String formId, int offset, String notice)
             throws SQLException {
         writeHeader(out, "Soumissions — " + formId);
@@ -535,9 +873,21 @@ public class EditSubmissionServlet extends HttpServlet {
                 + " Télécharger le formulaire (XML)</a>");
         out.println("</div>");
 
+        List<ColumnMeta> columns = listEditableColumns(conn, coreTable);
+
         out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=exportSelected'>");
-        out.println("<table><tr><th><input type='checkbox' id='selAll'></th><th>_URI</th><th>Date de soumission</th><th></th></tr>");
-        String sql = "SELECT \"_URI\", \"_SUBMISSION_DATE\" FROM odk_prod.\"" + coreTable + "\" "
+        out.println("<div style='overflow-x:auto;'>");
+        out.println("<table><tr><th><input type='checkbox' id='selAll'></th><th>_URI</th><th>Date de soumission</th>");
+        for (ColumnMeta col : columns) {
+            out.println("<th>" + htmlEscape(col.elementName) + "</th>");
+        }
+        out.println("<th></th></tr>");
+
+        StringBuilder selectCols = new StringBuilder("\"_URI\",\"_SUBMISSION_DATE\"");
+        for (ColumnMeta col : columns) {
+            selectCols.append(",\"").append(col.columnName).append("\"");
+        }
+        String sql = "SELECT " + selectCols + " FROM odk_prod.\"" + coreTable + "\" "
                 + "ORDER BY \"_SUBMISSION_DATE\" DESC NULLS LAST LIMIT ? OFFSET ?";
         int rowCount = 0;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -550,7 +900,13 @@ public class EditSubmissionServlet extends HttpServlet {
                     Object subDate = rs.getObject(2);
                     out.println("<tr><td><input type='checkbox' name='uri' class='sel-cb' value='" + htmlEscape(rowUri)
                             + "'></td><td>" + htmlEscape(rowUri) + "</td><td>"
-                            + htmlEscape(subDate == null ? "" : subDate.toString()) + "</td><td>"
+                            + htmlEscape(subDate == null ? "" : subDate.toString()) + "</td>");
+                    int idx = 3;
+                    for (ColumnMeta col : columns) {
+                        Object value = rs.getObject(idx++);
+                        out.println("<td>" + htmlEscape(formatValueForDisplay(value)) + "</td>");
+                    }
+                    out.println("<td>"
                             + "<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(rowUri)
                             + "'>" + ICON_EDIT + " Modifier</a> "
                             + "<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(rowUri)
@@ -559,6 +915,7 @@ public class EditSubmissionServlet extends HttpServlet {
             }
         }
         out.println("</table>");
+        out.println("</div>");
         if (rowCount > 0) {
             out.println("<div class='actions'>"
                     + "<button type='submit' formaction='editSubmission?formId=" + urlEncode(formId)
@@ -785,6 +1142,16 @@ public class EditSubmissionServlet extends HttpServlet {
     private static String formatValueForInput(Object value, String inputType) {
         if ("datetime-local".equals(inputType) && value instanceof java.util.Date) {
             return new SimpleDateFormat("yyyy-MM-dd'T'HH:mm").format((java.util.Date) value);
+        }
+        return value.toString();
+    }
+
+    private static String formatValueForDisplay(Object value) {
+        if (value == null) {
+            return "";
+        }
+        if (value instanceof Boolean) {
+            return ((Boolean) value) ? "Oui" : "Non";
         }
         return value.toString();
     }

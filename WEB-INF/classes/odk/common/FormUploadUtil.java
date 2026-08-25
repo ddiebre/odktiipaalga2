@@ -44,7 +44,10 @@ public final class FormUploadUtil {
 
     public static UploadResult uploadFormXml(HttpServletRequest req, byte[] xmlBytes, String fileName, String formTitle)
             throws IOException {
-        String uploadUrl = req.getScheme() + "://127.0.0.1:" + req.getLocalPort() + req.getContextPath() + "/formUpload";
+        // Toujours http (jamais req.getScheme(), qui vaut "https" derriere ngrok) : req.getLocalPort()
+        // designe le connecteur Tomcat local reel, qui sert en clair - un appel https vers ce port
+        // provoque "Unsupported or unrecognized SSL message" (poignee de main TLS contre un port HTTP).
+        String uploadUrl = "http://127.0.0.1:" + req.getLocalPort() + req.getContextPath() + "/formUpload";
         RequestConfig config = RequestConfig.custom().setConnectTimeout(15000).setSocketTimeout(15000).build();
         try (CloseableHttpClient client = HttpClients.custom().setDefaultRequestConfig(config).build()) {
             HttpPost post = new HttpPost(uploadUrl);

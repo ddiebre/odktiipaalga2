@@ -79,6 +79,12 @@ public class HomeServlet extends HttpServlet {
                 null,
                 ICON_UPLOAD));
         MENU_ITEMS.add(new MenuItem(
+                "Importer un XLSForm (Excel)",
+                "Convertir un formulaire écrit en Excel, télécharger le XML et choisir de le déployer ou non.",
+                "editSubmission?action=importXlsForm",
+                null,
+                ICON_UPLOAD));
+        MENU_ITEMS.add(new MenuItem(
                 "Modifier une soumission",
                 "Consulter, corriger, importer (CSV) ou visualiser sur carte les soumissions d'un formulaire.",
                 "editSubmission",

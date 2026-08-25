@@ -21,6 +21,11 @@ import javax.sql.DataSource;
 import org.apache.commons.fileupload.FileItem;
 import org.apache.commons.fileupload.disk.DiskFileItemFactory;
 import org.apache.commons.fileupload.servlet.ServletFileUpload;
+import org.opendatakit.aggregate.ContextFactory;
+import org.opendatakit.common.security.client.UserSecurityInfo;
+import org.opendatakit.common.security.common.GrantedAuthorityName;
+import org.opendatakit.common.security.server.SecurityServiceUtil;
+import org.opendatakit.common.web.CallingContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
@@ -93,7 +98,18 @@ public class ProjectServlet extends HttpServlet {
                     + "ON odk_prod.app_project_form(project_id)");
             st.execute("CREATE INDEX IF NOT EXISTS app_project_form_form_id_idx "
                     + "ON odk_prod.app_project_form(form_id)");
-            getServletContext().log("ProjectServlet: tables odk_prod.app_project / app_project_form prêtes.");
+            st.execute("CREATE TABLE IF NOT EXISTS odk_prod.app_project_user ("
+                    + "id SERIAL PRIMARY KEY,"
+                    + "project_id INTEGER NOT NULL REFERENCES odk_prod.app_project(id) ON DELETE CASCADE,"
+                    + "username VARCHAR(255) NOT NULL,"
+                    + "added_by VARCHAR(255),"
+                    + "added_at TIMESTAMP NOT NULL DEFAULT now(),"
+                    + "CONSTRAINT app_project_user_unique UNIQUE (project_id, username))");
+            st.execute("CREATE INDEX IF NOT EXISTS app_project_user_project_id_idx "
+                    + "ON odk_prod.app_project_user(project_id)");
+            st.execute("CREATE INDEX IF NOT EXISTS app_project_user_username_idx "
+                    + "ON odk_prod.app_project_user(username)");
+            getServletContext().log("ProjectServlet: tables odk_prod.app_project / app_project_form / app_project_user prêtes.");
         } catch (SQLException e) {
             getServletContext().log("ProjectServlet: échec de la création des tables app_project", e);
         }
@@ -123,6 +139,9 @@ public class ProjectServlet extends HttpServlet {
             "<svg viewBox='0 0 24 24'><path d='M12 16V4'/><path d='M7 9l5-5 5 5'/><path d='M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3'/></svg>";
     private static final String ICON_DOWNLOAD =
             "<svg viewBox='0 0 24 24'><path d='M12 4v12'/><path d='M7 11l5 5 5-5'/><path d='M4 20h16'/></svg>";
+    private static final String ICON_USERS =
+            "<svg viewBox='0 0 24 24'><circle cx='9' cy='8' r='3.2'/><path d='M3.5 20c0-3.3 2.6-6 6-6s6 2.7 6 6'/>"
+            + "<circle cx='17.5' cy='9' r='2.6'/><path d='M15.8 14.3c2.6.4 4.7 2.6 4.7 5.7'/></svg>";
 
     private void writeHeader(PrintWriter out, String title) {
         out.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
@@ -163,6 +182,9 @@ public class ProjectServlet extends HttpServlet {
                 renderProjectForm(out, project, null);
             } else if ("addForm".equals(action)) {
                 renderAddFormPicker(conn, out, project);
+            } else if ("addCollector".equals(action)) {
+                CallingContext cc = ContextFactory.getCallingContext(this, req);
+                renderAddCollectorPicker(conn, out, project, cc);
             } else if ("importXml".equals(action)) {
                 renderImportXmlForm(out, project, null);
             } else if ("delete".equals(action)) {
@@ -227,6 +249,18 @@ public class ProjectServlet extends HttpServlet {
                 String formId = req.getParameter("formId");
                 if (formId != null) {
                     removeFormFromProject(conn, projectId, formId);
+                }
+                resp.sendRedirect("project?projectId=" + projectId);
+            } else if ("addCollector".equals(action)) {
+                String username = req.getParameter("username");
+                if (username != null && !username.trim().isEmpty()) {
+                    addCollectorToProject(conn, projectId, username.trim(), currentUserName());
+                }
+                resp.sendRedirect("project?projectId=" + projectId);
+            } else if ("removeCollector".equals(action)) {
+                String username = req.getParameter("username");
+                if (username != null) {
+                    removeCollectorFromProject(conn, projectId, username);
                 }
                 resp.sendRedirect("project?projectId=" + projectId);
             } else if ("importXml".equals(action)) {
@@ -355,6 +389,54 @@ public class ProjectServlet extends HttpServlet {
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, projectId);
             ps.setString(2, formId);
+            ps.executeUpdate();
+        }
+    }
+
+    private static List<String> listAssignedCollectors(Connection conn, int projectId) throws SQLException {
+        String sql = "SELECT username FROM odk_prod.app_project_user WHERE project_id = ? ORDER BY username";
+        List<String> usernames = new ArrayList<String>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, projectId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    usernames.add(rs.getString(1));
+                }
+            }
+        }
+        return usernames;
+    }
+
+    /** Comptes ROLE_DATA_COLLECTOR (groupe GROUP_DATA_COLLECTORS) pas encore affectes a ce projet. */
+    private static List<String> listAddableCollectors(Connection conn, int projectId, CallingContext cc) throws Exception {
+        List<String> assigned = listAssignedCollectors(conn, projectId);
+        ArrayList<UserSecurityInfo> all = SecurityServiceUtil.getAllUsers(true, cc);
+        List<String> addable = new ArrayList<String>();
+        for (UserSecurityInfo u : all) {
+            if (u.getAssignedUserGroups() != null && u.getAssignedUserGroups().contains(GrantedAuthorityName.GROUP_DATA_COLLECTORS)
+                    && !assigned.contains(u.getUsername())) {
+                addable.add(u.getUsername());
+            }
+        }
+        return addable;
+    }
+
+    private static void addCollectorToProject(Connection conn, int projectId, String username, String addedBy) throws SQLException {
+        String sql = "INSERT INTO odk_prod.app_project_user(project_id, username, added_by) VALUES (?,?,?) "
+                + "ON CONFLICT (project_id, username) DO NOTHING";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, projectId);
+            ps.setString(2, username);
+            ps.setString(3, addedBy);
+            ps.executeUpdate();
+        }
+    }
+
+    private static void removeCollectorFromProject(Connection conn, int projectId, String username) throws SQLException {
+        String sql = "DELETE FROM odk_prod.app_project_user WHERE project_id = ? AND username = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, projectId);
+            ps.setString(2, username);
             ps.executeUpdate();
         }
     }
@@ -506,6 +588,8 @@ public class ProjectServlet extends HttpServlet {
                 + " Ajouter un formulaire</a>");
         out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=importXml'>" + ICON_UPLOAD
                 + " Importer un formulaire XML</a>");
+        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=addCollector'>" + ICON_USERS
+                + " Affecter un agent</a>");
         out.println("<a class='btn-link danger' href='project?projectId=" + project.id + "&action=delete'>" + ICON_TRASH
                 + " Supprimer le projet</a>");
         out.println("</div>");
@@ -535,6 +619,52 @@ public class ProjectServlet extends HttpServlet {
                 out.println("</tr>");
             }
             out.println("</table>");
+        }
+
+        out.println("<h2 style='margin-top:32px;'>Agents de collecte affectés</h2>");
+        out.println("<p class='info'>Un agent affecté à ce projet ne verra, sur son téléphone, que les formulaires "
+                + "listés ci-dessus. Un agent non affecté à aucun projet ne verra aucun formulaire.</p>");
+        List<String> collectors = listAssignedCollectors(conn, project.id);
+        if (collectors.isEmpty()) {
+            out.println("<p class='info'>Aucun agent affecté à ce projet.</p>");
+        } else {
+            out.println("<table><tr><th>Nom d'utilisateur</th><th></th></tr>");
+            for (String username : collectors) {
+                out.println("<tr><td>" + htmlEscape(username) + "</td><td>"
+                        + "<form class='inline' method='post' action='project?projectId=" + project.id + "&action=removeCollector'>"
+                        + "<input type='hidden' name='username' value='" + htmlEscape(username) + "'>"
+                        + "<button type='submit' class='btn-link danger'>" + ICON_TRASH + " Retirer</button></form></td></tr>");
+            }
+            out.println("</table>");
+        }
+        writeFooter(out);
+    }
+
+    private void renderAddCollectorPicker(Connection conn, PrintWriter out, Project project, CallingContext cc)
+            throws SQLException {
+        writeHeader(out, "Affecter un agent — " + project.name);
+        out.println("<p class='back-link'><a href='project?projectId=" + project.id + "'>&laquo; Retour au projet</a></p>");
+        List<String> addable;
+        try {
+            addable = listAddableCollectors(conn, project.id, cc);
+        } catch (Exception e) {
+            out.println("<p class='err'>Erreur : " + htmlEscape(e.getMessage()) + "</p>");
+            writeFooter(out);
+            return;
+        }
+        if (addable.isEmpty()) {
+            out.println("<p class='info'>Aucun agent de collecte disponible à affecter "
+                    + "(tous déjà affectés, ou aucun compte avec le rôle Collecteur de données).</p>");
+        } else {
+            out.println("<ul class='list'>");
+            for (String username : addable) {
+                out.println("<li style='display:flex;justify-content:space-between;align-items:center;'>"
+                        + "<span>" + htmlEscape(username) + "</span>"
+                        + "<form class='inline' method='post' action='project?projectId=" + project.id + "&action=addCollector'>"
+                        + "<input type='hidden' name='username' value='" + htmlEscape(username) + "'>"
+                        + "<button type='submit' class='btn-link'>" + ICON_PLUS + " Affecter</button></form></li>");
+            }
+            out.println("</ul>");
         }
         writeFooter(out);
     }

@@ -100,6 +100,22 @@
 	    <url-pattern>/aggregateui/formservice</url-pattern>
 	</filter-mapping>
 
+	<!-- Filtre la liste de formulaires (/formList, /xformsList) selon l'affectation projet d'un
+	     ROLE_DATA_COLLECTOR (odk_prod.app_project_user / app_project_form). Doit rester APRES
+	     FormListUrlRewriteFilter ci-dessus (voir le commentaire dans ProjectFormListFilter.java). -->
+	<filter>
+	    <filter-name>ProjectFormListFilter</filter-name>
+	    <filter-class>odk.formlist.rewrite.ProjectFormListFilter</filter-class>
+	</filter>
+	<filter-mapping>
+	    <filter-name>ProjectFormListFilter</filter-name>
+	    <url-pattern>/formList</url-pattern>
+	</filter-mapping>
+	<filter-mapping>
+	    <filter-name>ProjectFormListFilter</filter-name>
+	    <url-pattern>/xformsList</url-pattern>
+	</filter-mapping>
+
 	<!-- Ajoute un lien "Modifier une soumission" sur la page Aggregate.html pour les ROLE_DATA_OWNER -->
 	<filter>
 	    <filter-name>EditSubmissionMenuLinkFilter</filter-name>

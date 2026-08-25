@@ -21,7 +21,8 @@ import org.opendatakit.common.security.server.SecurityServiceUtil;
 import org.opendatakit.common.security.spring.CredentialsInfoBuilderInternal;
 import org.opendatakit.common.web.CallingContext;
 import org.springframework.security.authentication.encoding.MessageDigestPasswordEncoder;
-import org.springframework.security.core.context.SecurityContextHolder;
+
+import odk.common.FormSchemaUtil;
 
 /**
  * Admin-only tool (see /manageUsers intercept-url, ROLE_SITE_ACCESS_ADMIN)
@@ -152,7 +153,7 @@ public class UserManagementServlet extends HttpServlet {
         PrintWriter out = resp.getWriter();
         try {
             if ("new".equals(action)) {
-                renderUserForm(out, false, "", "", "", new TreeSet<GrantedAuthorityName>(), null);
+                renderUserForm(out, false, "", "", new TreeSet<GrantedAuthorityName>(), null);
             } else if ("edit".equals(action)) {
                 String username = req.getParameter("username");
                 ArrayList<UserSecurityInfo> all = SecurityServiceUtil.getAllUsers(true, cc);
@@ -162,7 +163,7 @@ public class UserManagementServlet extends HttpServlet {
                     out.println("<p class='err'>Utilisateur introuvable.</p>");
                     writeFooter(out);
                 } else {
-                    renderUserForm(out, true, found.getUsername(), found.getFullName(), found.getEmail(),
+                    renderUserForm(out, true, found.getUsername(), found.getFullName(),
                             found.getAssignedUserGroups(), null);
                 }
             } else if ("delete".equals(action)) {
@@ -235,7 +236,7 @@ public class UserManagementServlet extends HttpServlet {
         writeFooter(out);
     }
 
-    private void renderUserForm(PrintWriter out, boolean editing, String username, String fullName, String email,
+    private void renderUserForm(PrintWriter out, boolean editing, String username, String fullName,
             Set<GrantedAuthorityName> selectedGroups, String error) {
         writeHeader(out, editing ? "Modifier l'utilisateur" : "Nouvel utilisateur");
         out.println("<p class='back-link'><a href='manageUsers'>&laquo; Liste des utilisateurs</a></p>");
@@ -255,8 +256,6 @@ public class UserManagementServlet extends HttpServlet {
         }
         out.println("<label>Nom complet</label><input type='text' name='fullName' value='"
                 + htmlEscape(fullName == null ? "" : fullName) + "'>");
-        out.println("<label>E-mail</label><input type='text' name='email' value='"
-                + htmlEscape(email == null ? "" : email) + "'>");
         if (editing) {
             out.println("<label>Nouveau mot de passe</label><input type='password' name='password' "
                     + "placeholder='(laisser vide pour ne pas changer)'>");
@@ -282,26 +281,27 @@ public class UserManagementServlet extends HttpServlet {
     private void handleCreate(CallingContext cc, HttpServletRequest req, HttpServletResponse resp) throws IOException {
         String username = trimToNull(req.getParameter("username"));
         String fullName = trimToNull(req.getParameter("fullName"));
-        String email = trimToNull(req.getParameter("email"));
         String password = req.getParameter("password");
         Set<GrantedAuthorityName> groups = readSelectedGroups(req);
 
         resp.setContentType("text/html;charset=UTF-8");
         if (username == null) {
-            renderUserForm(resp.getWriter(), false, "", fullName, email, groups, "Le nom d'utilisateur est obligatoire.");
+            renderUserForm(resp.getWriter(), false, "", fullName, groups, "Le nom d'utilisateur est obligatoire.");
             return;
         }
         if (password == null || password.isEmpty()) {
-            renderUserForm(resp.getWriter(), false, username, fullName, email, groups, "Le mot de passe initial est obligatoire.");
+            renderUserForm(resp.getWriter(), false, username, fullName, groups, "Le mot de passe initial est obligatoire.");
             return;
         }
         try {
             ArrayList<UserSecurityInfo> all = SecurityServiceUtil.getAllUsers(true, cc);
             if (findUser(all, username) != null) {
-                renderUserForm(resp.getWriter(), false, username, fullName, email, groups, "Ce nom d'utilisateur existe déjà.");
+                renderUserForm(resp.getWriter(), false, username, fullName, groups, "Ce nom d'utilisateur existe déjà.");
                 return;
             }
-            UserSecurityInfo newUser = new UserSecurityInfo(username, fullName, email, UserSecurityInfo.UserType.REGISTERED);
+            // ODK exige "soit username, soit email" (jamais les deux) sur un UserSecurityInfo -
+            // cet outil ne gere que des comptes locaux, donc email reste toujours null ici.
+            UserSecurityInfo newUser = new UserSecurityInfo(username, fullName, null, UserSecurityInfo.UserType.REGISTERED);
             newUser.setAssignedUserGroups(new TreeSet<GrantedAuthorityName>(groups));
             all.add(newUser);
             SecurityServiceUtil.setStandardSiteAccessConfiguration(all, new ArrayList<GrantedAuthorityName>(), cc);
@@ -312,14 +312,13 @@ public class UserManagementServlet extends HttpServlet {
 
             resp.sendRedirect("manageUsers?created=1");
         } catch (Exception e) {
-            renderUserForm(resp.getWriter(), false, username, fullName, email, groups, "Erreur : " + e.getMessage());
+            renderUserForm(resp.getWriter(), false, username, fullName, groups, "Erreur : " + e.getMessage());
         }
     }
 
     private void handleUpdate(CallingContext cc, HttpServletRequest req, HttpServletResponse resp) throws IOException {
         String username = req.getParameter("username");
         String fullName = trimToNull(req.getParameter("fullName"));
-        String email = trimToNull(req.getParameter("email"));
         String password = req.getParameter("password");
         Set<GrantedAuthorityName> groups = readSelectedGroups(req);
 
@@ -328,11 +327,10 @@ public class UserManagementServlet extends HttpServlet {
             ArrayList<UserSecurityInfo> all = SecurityServiceUtil.getAllUsers(true, cc);
             UserSecurityInfo target = findUser(all, username);
             if (target == null) {
-                renderUserForm(resp.getWriter(), true, username, fullName, email, groups, "Utilisateur introuvable.");
+                renderUserForm(resp.getWriter(), true, username, fullName, groups, "Utilisateur introuvable.");
                 return;
             }
             target.setFullName(fullName);
-            target.setEmail(email);
             target.setAssignedUserGroups(new TreeSet<GrantedAuthorityName>(groups));
             SecurityServiceUtil.setStandardSiteAccessConfiguration(all, new ArrayList<GrantedAuthorityName>(), cc);
 
@@ -344,15 +342,14 @@ public class UserManagementServlet extends HttpServlet {
 
             resp.sendRedirect("manageUsers?updated=1");
         } catch (Exception e) {
-            renderUserForm(resp.getWriter(), true, username, fullName, email, groups, "Erreur : " + e.getMessage());
+            renderUserForm(resp.getWriter(), true, username, fullName, groups, "Erreur : " + e.getMessage());
         }
     }
 
     private void handleDelete(CallingContext cc, HttpServletRequest req, HttpServletResponse resp) throws IOException {
         String username = req.getParameter("username");
 
-        String currentUsername = SecurityContextHolder.getContext().getAuthentication() != null
-                ? SecurityContextHolder.getContext().getAuthentication().getName() : null;
+        String currentUsername = FormSchemaUtil.currentLocalUsername();
         if (username != null && username.equals(currentUsername)) {
             resp.sendRedirect("manageUsers?delerr=self");
             return;

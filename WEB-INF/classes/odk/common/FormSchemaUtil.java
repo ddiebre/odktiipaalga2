@@ -8,6 +8,10 @@ import java.sql.Timestamp;
 import java.util.HashSet;
 import java.util.Set;
 
+import org.springframework.security.authentication.AnonymousAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+
 /**
  * Resolution du schema ODK (formId -> table "core" contenant les soumissions)
  * et petits utilitaires HTML/URL partages entre les outils internes
@@ -111,5 +115,33 @@ public final class FormSchemaUtil {
             }
         }
         return ids;
+    }
+
+    /**
+     * Nom d'utilisateur local (LOCAL_USERNAME, ex. "test") de la personne connectee.
+     * Attention : Authentication.getName() renvoie en realite l'_URI interne d'ODK
+     * (ex. "uid:test|2026-08-13T18:08:01.499+0000", quel que soit le mecanisme
+     * d'authentification - Digest, formulaire de connexion, etc., car c'est ce que
+     * UserDetailsServiceImpl utilise comme "username" Spring Security), pas le
+     * LOCAL_USERNAME utilise ailleurs (ex. UserSecurityInfo.getUsername(), ou les
+     * noms stockes dans odk_prod.app_project_user/app_project_form). Cette methode
+     * fait l'extraction pour permettre une comparaison correcte avec ces valeurs -
+     * a utiliser partout ou on doit comparer l'utilisateur connecte a un LOCAL_USERNAME,
+     * PAS pour horodater un _CREATOR_URI_USER/_LAST_UPDATE_URI_USER (qui doivent
+     * rester des URI, cf. EditSubmissionServlet/ProjectServlet).
+     */
+    public static String currentLocalUsername() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated() || auth instanceof AnonymousAuthenticationToken) {
+            return null;
+        }
+        String name = auth.getName();
+        if (name != null && name.startsWith("uid:")) {
+            int pipe = name.indexOf('|');
+            if (pipe > 4) {
+                return name.substring(4, pipe);
+            }
+        }
+        return name;
     }
 }
