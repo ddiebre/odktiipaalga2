@@ -31,6 +31,8 @@ import javax.sql.DataSource;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 
+import org.opendatakit.aggregate.ContextFactory;
+import org.opendatakit.common.web.CallingContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
@@ -40,8 +42,10 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.xml.sax.InputSource;
 
+import odk.common.FormDeletionUtil;
 import odk.common.FormSchemaUtil;
 import odk.common.FormUploadUtil;
+import odk.common.NavBar;
 import odk.common.XlsFormConverter;
 
 /**
@@ -255,12 +259,17 @@ public class EditSubmissionServlet extends HttpServlet {
             "<svg viewBox='0 0 24 24'><path d='M12 21s7-6.5 7-11a7 7 0 1 0-14 0c0 4.5 7 11 7 11z'/><circle cx='12' cy='10' r='2.4'/></svg>";
 
     private void writeHeader(PrintWriter out, String title) {
+        writeHeader(out, title, "soumissions");
+    }
+
+    private void writeHeader(PrintWriter out, String title, String section) {
         out.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
         out.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
         out.println("<title>" + htmlEscape(title) + "</title>");
-        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css'>");
+        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css?v=" + FormSchemaUtil.ASSET_VERSION + "'>");
+        out.println("<script src='javascript/odk-tools.js?v=" + FormSchemaUtil.ASSET_VERSION + "' defer></script>");
         out.println("</head><body>");
-        out.println("<div class='topbar'><a href='home' class='topbar-link'>&laquo; Menu</a> &middot; ODK Tiipaalga &middot; Modifier une soumission</div>");
+        NavBar.render(out, getServletContext(), section);
         out.println("<div class='container'>");
         out.println("<h2>" + htmlEscape(title) + "</h2>");
     }
@@ -289,16 +298,23 @@ public class EditSubmissionServlet extends HttpServlet {
                 renderImportFormPage(out, null);
             } else if (formId == null && "importXlsForm".equals(action)) {
                 renderImportXlsFormPage(out, null);
+            } else if (formId == null && "submissions".equals(action)) {
+                renderSubmissionsHome(conn, out);
             } else if (formId == null) {
-                renderFormList(conn, out);
+                String deletedForm = req.getParameter("deletedForm");
+                renderFormList(conn, out, "1".equals(deletedForm) ? "Formulaire supprimé." : null);
             } else if ("new".equals(action)) {
                 renderCreateForm(conn, out, formId, null);
             } else if ("csv".equals(action)) {
                 renderCsvUploadForm(conn, out, formId, null);
+            } else if ("csvUpdate".equals(action)) {
+                renderCsvUpdateForm(conn, out, formId, null);
             } else if ("map".equals(action)) {
                 renderMap(conn, out, formId);
             } else if ("delete".equals(action) && uri != null) {
                 renderDeleteConfirm(conn, out, formId, uri, null);
+            } else if ("deleteForm".equals(action)) {
+                renderDeleteFormConfirm(conn, out, formId, null);
             } else if (uri == null) {
                 int offset = 0;
                 try {
@@ -340,13 +356,32 @@ public class EditSubmissionServlet extends HttpServlet {
                 handleDeployConvertedXml(conn, req, resp);
                 return;
             }
+            if ("deleteFormConfirm".equals(action)) {
+                handleDeleteFormConfirm(conn, req, resp, formId);
+                return;
+            }
             if ("exportSelected".equals(action)) {
                 streamCsvExport(conn, resp, formId, req.getParameterValues("uri"));
                 return;
             }
             if ("csvUpload".equals(action)) {
                 resp.setContentType("text/html;charset=UTF-8");
-                renderCsvUploadResult(conn, req, resp.getWriter(), formId);
+                renderCsvPreview(conn, req, resp.getWriter(), formId);
+                return;
+            }
+            if ("csvConfirm".equals(action)) {
+                resp.setContentType("text/html;charset=UTF-8");
+                handleCsvConfirm(conn, req, resp.getWriter(), formId);
+                return;
+            }
+            if ("csvUpdateUpload".equals(action)) {
+                resp.setContentType("text/html;charset=UTF-8");
+                renderCsvUpdatePreview(conn, req, resp.getWriter(), formId);
+                return;
+            }
+            if ("csvUpdateConfirm".equals(action)) {
+                resp.setContentType("text/html;charset=UTF-8");
+                handleCsvUpdateConfirm(conn, req, resp.getWriter(), formId);
                 return;
             }
             if ("create".equals(action)) {
@@ -416,8 +451,11 @@ public class EditSubmissionServlet extends HttpServlet {
         }
     }
 
-    private void renderFormList(Connection conn, PrintWriter out) throws SQLException {
-        writeHeader(out, "Choisir un formulaire");
+    private void renderFormList(Connection conn, PrintWriter out, String notice) throws SQLException {
+        writeHeader(out, "Choisir un formulaire", "formulaires");
+        if (notice != null) {
+            out.println("<p class='success'>" + htmlEscape(notice) + "</p>");
+        }
         out.println("<p class='info'>Sélectionnez le formulaire dont vous voulez modifier une soumission.</p>");
         out.println("<div class='toolbar'>");
         out.println("<a class='btn-link' href='editSubmission?action=importForm'>" + ICON_UPLOAD
@@ -425,25 +463,81 @@ public class EditSubmissionServlet extends HttpServlet {
         out.println("<a class='btn-link' href='editSubmission?action=importXlsForm'>" + ICON_UPLOAD
                 + " Importer un XLSForm (Excel)</a>");
         out.println("</div>");
-        out.println("<ul class='list'>");
         String sql = "SELECT \"SUBMISSION_FORM_ID\" FROM odk_prod.\"_form_info_submission_association\" "
                 + "WHERE \"IS_SUBMISSION_ALLOWED\" = true AND \"URI_SUBMISSION_DATA_MODEL\" IS NOT NULL "
                 + "ORDER BY \"SUBMISSION_FORM_ID\"";
+        List<String> formIds = new ArrayList<String>();
         try (PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
-                String formId = rs.getString(1);
-                out.println("<li><a href='editSubmission?formId=" + urlEncode(formId) + "'>"
-                        + htmlEscape(formId) + "</a></li>");
+                formIds.add(rs.getString(1));
             }
         }
-        out.println("</ul>");
+        if (formIds.isEmpty()) {
+            out.println("<p class='info'>Aucun formulaire pour le moment.</p>");
+        } else {
+            out.println("<div class='table-enhance'>");
+            out.println("<input type='text' class='table-search-input' placeholder='Rechercher un formulaire...'>");
+            out.println("<table><thead><tr><th data-sortable>Formulaire</th><th></th></tr></thead><tbody>");
+            for (String formId : formIds) {
+                out.println("<tr><td><a href='editSubmission?formId=" + urlEncode(formId) + "'>"
+                        + htmlEscape(formId) + "</a></td><td><div class='row-actions'>"
+                        + "<a class='btn-link' href='formXml?formId=" + urlEncode(formId) + "'>" + ICON_DOWNLOAD
+                        + " Télécharger</a>"
+                        + "<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId)
+                        + "&action=deleteForm'>" + ICON_TRASH + " Supprimer</a>"
+                        + "</div></td></tr>");
+            }
+            out.println("</tbody></table>");
+            out.println("</div>");
+        }
+        writeFooter(out);
+    }
+
+    /** Ecran d'accueil de la section "Soumissions" : formulaires avec leur nombre de soumissions. */
+    private void renderSubmissionsHome(Connection conn, PrintWriter out) throws SQLException {
+        writeHeader(out, "Soumissions", "soumissions");
+        out.println("<p class='info'>Choisissez un formulaire pour consulter, modifier ou exporter ses soumissions.</p>");
+        String sql = "SELECT \"SUBMISSION_FORM_ID\" FROM odk_prod.\"_form_info_submission_association\" "
+                + "WHERE \"IS_SUBMISSION_ALLOWED\" = true AND \"URI_SUBMISSION_DATA_MODEL\" IS NOT NULL "
+                + "ORDER BY \"SUBMISSION_FORM_ID\"";
+        List<String> formIds = new ArrayList<String>();
+        try (PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                formIds.add(rs.getString(1));
+            }
+        }
+        if (formIds.isEmpty()) {
+            out.println("<p class='info'>Aucun formulaire pour le moment.</p>");
+        } else {
+            out.println("<div class='table-enhance'>");
+            out.println("<input type='text' class='table-search-input' placeholder='Rechercher un formulaire...'>");
+            out.println("<table><thead><tr><th data-sortable>Formulaire</th><th data-sortable>Soumissions</th>"
+                    + "<th data-sortable>Dernière soumission</th><th></th></tr></thead><tbody>");
+            for (String formId : formIds) {
+                out.println("<tr>");
+                try {
+                    FormSchemaUtil.SubmissionStats stats = FormSchemaUtil.submissionStats(conn, formId);
+                    out.println("<td>" + htmlEscape(formId) + "</td>");
+                    out.println("<td>" + stats.count + "</td>");
+                    out.println("<td>" + htmlEscape(stats.lastSubmissionDate == null ? "" : stats.lastSubmissionDate.toString())
+                            + "</td>");
+                } catch (SQLException e) {
+                    out.println("<td>" + htmlEscape(formId) + "</td><td class='err' colspan='2'>Indisponible</td>");
+                }
+                out.println("<td><a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "'>"
+                        + ICON_EDIT + " Voir les soumissions</a></td>");
+                out.println("</tr>");
+            }
+            out.println("</tbody></table>");
+            out.println("</div>");
+        }
         writeFooter(out);
     }
 
     // ---- Import direct d'un formulaire XML (delegue a l'endpoint ODK existant /formUpload) -----
 
     private void renderImportFormPage(PrintWriter out, String error) {
-        writeHeader(out, "Importer un formulaire XML");
+        writeHeader(out, "Importer un formulaire XML", "formulaires");
         out.println("<p class='back-link'><a href='editSubmission'>&laquo; Formulaires</a></p>");
         if (error != null) {
             out.println("<p class='err'>" + htmlEscape(error) + "</p>");
@@ -540,7 +634,7 @@ public class EditSubmissionServlet extends HttpServlet {
     // ---- Import XLSForm (Excel) -> conversion en XML -> telecharger et/ou deployer --------------
 
     private void renderImportXlsFormPage(PrintWriter out, String error) {
-        writeHeader(out, "Importer un XLSForm (Excel)");
+        writeHeader(out, "Importer un XLSForm (Excel)", "formulaires");
         out.println("<p class='back-link'><a href='editSubmission'>&laquo; Formulaires</a></p>");
         if (error != null) {
             out.println("<p class='err'>" + htmlEscape(error) + "</p>");
@@ -610,7 +704,7 @@ public class EditSubmissionServlet extends HttpServlet {
 
     private void renderXlsFormResult(PrintWriter out, byte[] xmlBytes, String formTitle, String error) throws IOException {
         String xmlText = new String(xmlBytes, "UTF-8");
-        writeHeader(out, "Formulaire converti");
+        writeHeader(out, "Formulaire converti", "formulaires");
         out.println("<p class='back-link'><a href='editSubmission'>&laquo; Formulaires</a></p>");
         if (error != null) {
             out.println("<p class='err'>" + htmlEscape(error) + "</p>");
@@ -865,23 +959,30 @@ public class EditSubmissionServlet extends HttpServlet {
                 + " Nouvelle soumission</a>");
         out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=csv'>" + ICON_UPLOAD
                 + " Importer CSV</a>");
+        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=csvUpdate'>" + ICON_UPLOAD
+                + " Mettre à jour via CSV</a>");
         out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=map'>" + ICON_MAP
                 + " Carte</a>");
         out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=exportAll'>" + ICON_DOWNLOAD
                 + " Télécharger tout (CSV)</a>");
         out.println("<a class='btn-link' href='formXml?formId=" + urlEncode(formId) + "'>" + ICON_DOWNLOAD
                 + " Télécharger le formulaire (XML)</a>");
+        out.println("<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&action=deleteForm'>"
+                + ICON_TRASH + " Supprimer ce formulaire</a>");
         out.println("</div>");
 
         List<ColumnMeta> columns = listEditableColumns(conn, coreTable);
 
         out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=exportSelected'>");
+        out.println("<div class='table-enhance'>");
+        out.println("<input type='text' class='table-search-input' placeholder='Rechercher dans cette page...'>");
         out.println("<div style='overflow-x:auto;'>");
-        out.println("<table><tr><th><input type='checkbox' id='selAll'></th><th>_URI</th><th>Date de soumission</th>");
+        out.println("<table><thead><tr><th><input type='checkbox' id='selAll'></th><th data-sortable>_URI</th>"
+                + "<th data-sortable>Date de soumission</th>");
         for (ColumnMeta col : columns) {
-            out.println("<th>" + htmlEscape(col.elementName) + "</th>");
+            out.println("<th data-sortable>" + htmlEscape(col.elementName) + "</th>");
         }
-        out.println("<th></th></tr>");
+        out.println("<th></th></tr></thead><tbody>");
 
         StringBuilder selectCols = new StringBuilder("\"_URI\",\"_SUBMISSION_DATE\"");
         for (ColumnMeta col : columns) {
@@ -914,7 +1015,8 @@ public class EditSubmissionServlet extends HttpServlet {
                 }
             }
         }
-        out.println("</table>");
+        out.println("</tbody></table>");
+        out.println("</div>");
         out.println("</div>");
         if (rowCount > 0) {
             out.println("<div class='actions'>"
@@ -1091,6 +1193,71 @@ public class EditSubmissionServlet extends HttpServlet {
                 ps.setString(i + 1, uris[i]);
             }
             return ps.executeUpdate();
+        }
+    }
+
+    // ---- Suppression d'un formulaire entier (definition + toutes ses soumissions) ---------------
+
+    private void renderDeleteFormConfirm(Connection conn, PrintWriter out, String formId, String error) throws SQLException {
+        writeHeader(out, "Supprimer le formulaire", "formulaires");
+        out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                + "'>&laquo; Liste des soumissions</a></p>");
+        if (error != null) {
+            out.println("<p class='err'>" + htmlEscape(error) + "</p>");
+        }
+        long count = 0;
+        try {
+            count = FormSchemaUtil.submissionStats(conn, formId).count;
+        } catch (SQLException e) {
+            out.println("<p class='err'>Formulaire introuvable : " + htmlEscape(formId) + "</p>");
+            writeFooter(out);
+            return;
+        }
+        out.println("<div class='card'>");
+        out.println("<p class='err'>Cette action supprime <strong>définitivement</strong> le formulaire "
+                + "<strong>" + htmlEscape(formId) + "</strong> et ses <strong>" + count + "</strong> soumission(s). "
+                + "Aucune récupération possible.</p>");
+        out.println("<p>Pour confirmer, retapez l'identifiant exact du formulaire (<code>" + htmlEscape(formId)
+                + "</code>) ci-dessous :</p>");
+        out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=deleteFormConfirm'>");
+        out.println("<div class='form-grid'>");
+        out.println("<label>Identifiant du formulaire</label><input type='text' name='confirmFormId' required>");
+        out.println("</div>");
+        out.println("<div class='actions'><button type='submit' class='danger'>" + ICON_TRASH
+                + " Supprimer définitivement le formulaire</button></div>");
+        out.println("</form>");
+        out.println("</div>");
+        writeFooter(out);
+    }
+
+    private void handleDeleteFormConfirm(Connection conn, HttpServletRequest req, HttpServletResponse resp, String formId)
+            throws IOException, ServletException {
+        String confirmFormId = req.getParameter("confirmFormId");
+        resp.setContentType("text/html;charset=UTF-8");
+        if (confirmFormId == null || !confirmFormId.equals(formId)) {
+            try {
+                renderDeleteFormConfirm(conn, resp.getWriter(), formId,
+                        "L'identifiant saisi ne correspond pas exactement à « " + formId + " ». Rien n'a été supprimé.");
+            } catch (SQLException e) {
+                throw new ServletException(e);
+            }
+            return;
+        }
+        try {
+            CallingContext cc = ContextFactory.getCallingContext(this, req);
+            FormDeletionUtil.deleteForm(formId, cc);
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "DELETE FROM odk_prod.app_project_form WHERE form_id = ?")) {
+                ps.setString(1, formId);
+                ps.executeUpdate();
+            }
+            resp.sendRedirect("editSubmission?deletedForm=1");
+        } catch (Exception e) {
+            try {
+                renderDeleteFormConfirm(conn, resp.getWriter(), formId, "Erreur : " + e.getMessage());
+            } catch (SQLException e2) {
+                throw new ServletException(e2);
+            }
         }
     }
 
@@ -1348,11 +1515,12 @@ public class EditSubmissionServlet extends HttpServlet {
         out.flush();
     }
 
-    private void renderCsvUploadResult(Connection conn, HttpServletRequest req, PrintWriter out, String formId)
+    /** Étape 1 après l'upload du fichier : analyse le CSV, montre un aperçu et demande confirmation avant d'écrire quoi que ce soit. */
+    private void renderCsvPreview(Connection conn, HttpServletRequest req, PrintWriter out, String formId)
             throws SQLException {
-        writeHeader(out, "Import CSV — " + formId);
+        writeHeader(out, "Aperçu de l'import CSV — " + formId);
         out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
-                + "'>&laquo; Liste des soumissions</a></p>");
+                + "&action=csv'>&laquo; Choisir un autre fichier</a></p>");
 
         String coreTable;
         List<ColumnMeta> columns;
@@ -1393,6 +1561,158 @@ public class EditSubmissionServlet extends HttpServlet {
             return;
         }
         if (csvContent.charAt(0) == '﻿') {
+            csvContent = csvContent.substring(1);
+        }
+
+        List<String[]> rows = parseCsv(csvContent);
+        if (rows.isEmpty()) {
+            out.println("<p class='err'>Fichier CSV vide.</p>");
+            writeFooter(out);
+            return;
+        }
+
+        String[] header = rows.get(0);
+        ColumnMeta[] columnForIndex = new ColumnMeta[header.length];
+        List<String> recognized = new ArrayList<String>();
+        List<String> unrecognized = new ArrayList<String>();
+        for (int i = 0; i < header.length; i++) {
+            String h = header[i] == null ? "" : header[i].trim().toUpperCase(java.util.Locale.ROOT);
+            ColumnMeta col = byColumnName.get(h);
+            columnForIndex[i] = col;
+            if (col != null) {
+                recognized.add(header[i]);
+            } else if (!h.isEmpty()) {
+                unrecognized.add(header[i]);
+            }
+        }
+
+        int dataRowCount = 0;
+        int blankRowCount = 0;
+        for (int r = 1; r < rows.size(); r++) {
+            boolean blank = true;
+            for (String cell : rows.get(r)) {
+                if (cell != null && !cell.trim().isEmpty()) {
+                    blank = false;
+                    break;
+                }
+            }
+            if (blank) {
+                blankRowCount++;
+            } else {
+                dataRowCount++;
+            }
+        }
+
+        out.println("<div class='card'>");
+        out.println("<p class='info'><strong>" + dataRowCount + "</strong> soumission(s) seront créées"
+                + (blankRowCount > 0 ? " (" + blankRowCount + " ligne(s) vide(s) ignorée(s))" : "") + ".</p>");
+        if (!recognized.isEmpty()) {
+            out.println("<p class='success'>Colonnes reconnues : " + htmlEscape(String.join(", ", recognized)) + "</p>");
+        }
+        if (!unrecognized.isEmpty()) {
+            out.println("<p class='err'>Colonnes ignorées (non reconnues par ce formulaire) : "
+                    + htmlEscape(String.join(", ", unrecognized)) + "</p>");
+        }
+        if (recognized.isEmpty()) {
+            out.println("<p class='err'>Aucune colonne du fichier ne correspond à ce formulaire. Vérifiez l'en-tête ou "
+                    + "téléchargez le modèle CSV.</p>");
+        }
+        out.println("</div>");
+
+        int totalDataRows = rows.size() - 1;
+        out.println("<h3>Aperçu (" + Math.min(20, totalDataRows) + " première(s) ligne(s) sur " + totalDataRows + ")</h3>");
+        out.println("<div style='overflow-x:auto;'>");
+        out.println("<table><thead><tr>");
+        for (int i = 0; i < header.length; i++) {
+            out.println("<th" + (columnForIndex[i] == null ? " class='err'" : "") + ">" + htmlEscape(header[i]) + "</th>");
+        }
+        out.println("</tr></thead><tbody>");
+        int shown = 0;
+        for (int r = 1; r < rows.size() && shown < 20; r++) {
+            String[] rowData = rows.get(r);
+            boolean blank = true;
+            for (String cell : rowData) {
+                if (cell != null && !cell.trim().isEmpty()) {
+                    blank = false;
+                    break;
+                }
+            }
+            if (blank) {
+                continue;
+            }
+            shown++;
+            out.println("<tr>");
+            for (int i = 0; i < header.length; i++) {
+                String v = i < rowData.length ? rowData[i] : "";
+                out.println("<td>" + htmlEscape(v) + "</td>");
+            }
+            out.println("</tr>");
+        }
+        out.println("</tbody></table>");
+        out.println("</div>");
+
+        if (dataRowCount > 0 && !recognized.isEmpty()) {
+            String encoded = java.util.Base64.getEncoder()
+                    .encodeToString(csvContent.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=csvConfirm'>");
+            out.println("<input type='hidden' name='csvData' value='" + htmlEscape(encoded) + "'>");
+            out.println("<div class='actions'>"
+                    + "<button type='submit'>" + ICON_UPLOAD + " Confirmer l'import de " + dataRowCount + " soumission(s)</button> "
+                    + "<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=csv'>Annuler</a>"
+                    + "</div>");
+            out.println("</form>");
+        }
+        writeFooter(out);
+    }
+
+    /** Étape 2 : appelée seulement après confirmation explicite ; décode le CSV validé à l'étape 1 et écrit les soumissions. */
+    private void handleCsvConfirm(Connection conn, HttpServletRequest req, PrintWriter out, String formId) throws SQLException {
+        String encoded = req.getParameter("csvData");
+        String csvContent;
+        if (encoded == null || encoded.trim().isEmpty()) {
+            writeHeader(out, "Import CSV — " + formId);
+            out.println("<p class='err'>Données CSV manquantes. Merci de recommencer l'import.</p>");
+            out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                    + "&action=csv'>&laquo; Recommencer</a></p>");
+            writeFooter(out);
+            return;
+        }
+        try {
+            csvContent = new String(java.util.Base64.getDecoder().decode(encoded), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            writeHeader(out, "Import CSV — " + formId);
+            out.println("<p class='err'>Données CSV invalides. Merci de recommencer l'import.</p>");
+            out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                    + "&action=csv'>&laquo; Recommencer</a></p>");
+            writeFooter(out);
+            return;
+        }
+        insertCsvRows(conn, csvContent, out, formId);
+    }
+
+    /** Écrit réellement les soumissions décrites par csvContent (appelé uniquement après confirmation de l'aperçu). */
+    private void insertCsvRows(Connection conn, String csvContent, PrintWriter out, String formId) throws SQLException {
+        writeHeader(out, "Import CSV — " + formId);
+        out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                + "'>&laquo; Liste des soumissions</a></p>");
+
+        String coreTable;
+        List<ColumnMeta> columns;
+        try {
+            coreTable = resolveCoreTableOrThrow(conn, formId);
+            columns = listEditableColumns(conn, coreTable);
+        } catch (SQLException e) {
+            out.println("<p class='err'>" + htmlEscape(e.getMessage()) + "</p>");
+            writeFooter(out);
+            return;
+        }
+
+        java.util.Map<String, ColumnMeta> byColumnName = new java.util.HashMap<String, ColumnMeta>();
+        for (ColumnMeta col : columns) {
+            byColumnName.put(col.columnName.toUpperCase(java.util.Locale.ROOT), col);
+        }
+
+        if (csvContent.length() > 0 && csvContent.charAt(0) == '﻿') {
             csvContent = csvContent.substring(1);
         }
 
@@ -1450,6 +1770,379 @@ public class EditSubmissionServlet extends HttpServlet {
 
         out.println("<div class='card'>");
         out.println("<p class='success'><strong>" + success + "</strong> soumission(s) créée(s) avec succès.</p>");
+        if (!unrecognized.isEmpty()) {
+            out.println("<p class='err'>Colonnes ignorées (non reconnues) : " + htmlEscape(String.join(", ", unrecognized)) + "</p>");
+        }
+        if (!errors.isEmpty()) {
+            out.println("<p class='err'>" + errors.size() + " ligne(s) en erreur :</p><ul>");
+            for (String err : errors) {
+                out.println("<li>" + htmlEscape(err) + "</li>");
+            }
+            out.println("</ul>");
+        }
+        out.println("</div>");
+        writeFooter(out);
+    }
+
+    // ---- Bulk CSV update (download, edit, re-import as an update instead of new rows) -----------
+
+    private void renderCsvUpdateForm(Connection conn, PrintWriter out, String formId, String error) throws SQLException {
+        writeHeader(out, "Mettre à jour des soumissions (CSV) — " + formId);
+        out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                + "'>&laquo; Liste des soumissions</a></p>");
+        if (error != null) {
+            out.println("<p class='err'>" + htmlEscape(error) + "</p>");
+        }
+        out.println("<div class='card'>");
+        out.println("<p class='info'>1. Téléchargez d'abord les données actuelles avec « "
+                + "<a href='editSubmission?formId=" + urlEncode(formId) + "&action=exportAll'>Télécharger tout (CSV)</a> » "
+                + "sur la liste des soumissions.<br>"
+                + "2. Modifiez les valeurs à corriger dans le fichier, <strong>sans supprimer ni modifier la colonne _URI</strong> "
+                + "(elle identifie quelle soumission mettre à jour).<br>"
+                + "3. Importez le fichier modifié ci-dessous : seules les colonnes présentes dans le fichier seront changées, "
+                + "les lignes dont le _URI ne correspond à aucune soumission seront ignorées et signalées.</p>");
+        out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId)
+                + "&action=csvUpdateUpload' enctype='multipart/form-data'>");
+        out.println("<p><input type='file' name='csvFile' accept='.csv,text/csv' required></p>");
+        out.println("<div class='actions'><button type='submit'>" + ICON_UPLOAD + " Analyser le fichier</button></div>");
+        out.println("</form>");
+        out.println("</div>");
+        writeFooter(out);
+    }
+
+    /** Étape 1 : analyse le CSV (doit contenir _URI), montre combien de soumissions seraient mises à jour, et demande confirmation. */
+    private void renderCsvUpdatePreview(Connection conn, HttpServletRequest req, PrintWriter out, String formId)
+            throws SQLException {
+        writeHeader(out, "Aperçu de la mise à jour CSV — " + formId);
+        out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                + "&action=csvUpdate'>&laquo; Choisir un autre fichier</a></p>");
+
+        String coreTable;
+        List<ColumnMeta> columns;
+        try {
+            coreTable = resolveCoreTableOrThrow(conn, formId);
+            columns = listEditableColumns(conn, coreTable);
+        } catch (SQLException e) {
+            out.println("<p class='err'>" + htmlEscape(e.getMessage()) + "</p>");
+            writeFooter(out);
+            return;
+        }
+        Map<String, ColumnMeta> byColumnName = new HashMap<String, ColumnMeta>();
+        for (ColumnMeta col : columns) {
+            byColumnName.put(col.columnName.toUpperCase(java.util.Locale.ROOT), col);
+        }
+
+        String csvContent = null;
+        try {
+            if (ServletFileUpload.isMultipartContent(req)) {
+                ServletFileUpload upload = new ServletFileUpload(new DiskFileItemFactory());
+                List<FileItem> items = upload.parseRequest(req);
+                for (FileItem item : items) {
+                    if (!item.isFormField() && "csvFile".equals(item.getFieldName())) {
+                        csvContent = item.getString("UTF-8");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            out.println("<p class='err'>Erreur de lecture du fichier : " + htmlEscape(e.getMessage()) + "</p>");
+            writeFooter(out);
+            return;
+        }
+        if (csvContent == null || csvContent.trim().isEmpty()) {
+            out.println("<p class='err'>Aucun fichier CSV reçu.</p>");
+            writeFooter(out);
+            return;
+        }
+        if (csvContent.charAt(0) == '﻿') {
+            csvContent = csvContent.substring(1);
+        }
+
+        List<String[]> rows = parseCsv(csvContent);
+        if (rows.isEmpty()) {
+            out.println("<p class='err'>Fichier CSV vide.</p>");
+            writeFooter(out);
+            return;
+        }
+
+        String[] header = rows.get(0);
+        int uriIndex = -1;
+        ColumnMeta[] columnForIndex = new ColumnMeta[header.length];
+        List<String> recognized = new ArrayList<String>();
+        List<String> unrecognized = new ArrayList<String>();
+        for (int i = 0; i < header.length; i++) {
+            String h = header[i] == null ? "" : header[i].trim().toUpperCase(java.util.Locale.ROOT);
+            if ("_URI".equals(h)) {
+                uriIndex = i;
+                continue;
+            }
+            if ("_SUBMISSION_DATE".equals(h)) {
+                continue;
+            }
+            ColumnMeta col = byColumnName.get(h);
+            columnForIndex[i] = col;
+            if (col != null) {
+                recognized.add(header[i]);
+            } else if (!h.isEmpty()) {
+                unrecognized.add(header[i]);
+            }
+        }
+
+        if (uriIndex < 0) {
+            out.println("<div class='card'><p class='err'>Colonne _URI manquante : ce fichier doit provenir d'un export "
+                    + "(« Télécharger tout (CSV) ») pour identifier quelles soumissions mettre à jour.</p></div>");
+            writeFooter(out);
+            return;
+        }
+
+        Set<String> existingUris = new HashSet<String>();
+        try (PreparedStatement ps = conn.prepareStatement("SELECT \"_URI\" FROM odk_prod.\"" + coreTable + "\"");
+                ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                existingUris.add(rs.getString(1));
+            }
+        }
+
+        int willUpdate = 0;
+        int notFound = 0;
+        int missingUri = 0;
+        for (int r = 1; r < rows.size(); r++) {
+            String[] rowData = rows.get(r);
+            boolean blank = true;
+            for (String cell : rowData) {
+                if (cell != null && !cell.trim().isEmpty()) {
+                    blank = false;
+                    break;
+                }
+            }
+            if (blank) {
+                continue;
+            }
+            String uri = uriIndex < rowData.length ? rowData[uriIndex] : null;
+            if (uri == null || uri.trim().isEmpty()) {
+                missingUri++;
+            } else if (existingUris.contains(uri.trim())) {
+                willUpdate++;
+            } else {
+                notFound++;
+            }
+        }
+
+        out.println("<div class='card'>");
+        out.println("<p class='info'><strong>" + willUpdate + "</strong> soumission(s) seront mises à jour"
+                + (notFound > 0 ? ", <strong>" + notFound + "</strong> _URI introuvable(s) (ignorée(s))" : "")
+                + (missingUri > 0 ? ", <strong>" + missingUri + "</strong> ligne(s) sans _URI (ignorée(s))" : "") + ".</p>");
+        if (!recognized.isEmpty()) {
+            out.println("<p class='success'>Colonnes qui seront modifiées : " + htmlEscape(String.join(", ", recognized)) + "</p>");
+        }
+        if (!unrecognized.isEmpty()) {
+            out.println("<p class='err'>Colonnes ignorées (non reconnues par ce formulaire) : "
+                    + htmlEscape(String.join(", ", unrecognized)) + "</p>");
+        }
+        if (recognized.isEmpty()) {
+            out.println("<p class='err'>Aucune colonne du fichier (en dehors de _URI) ne correspond à ce formulaire : "
+                    + "rien ne serait modifié.</p>");
+        }
+        out.println("</div>");
+
+        int totalDataRows = rows.size() - 1;
+        out.println("<h3>Aperçu (" + Math.min(20, totalDataRows) + " première(s) ligne(s) sur " + totalDataRows + ")</h3>");
+        out.println("<div style='overflow-x:auto;'>");
+        out.println("<table><thead><tr><th>Statut</th>");
+        for (int i = 0; i < header.length; i++) {
+            boolean isMeta = i == uriIndex;
+            out.println("<th" + (!isMeta && columnForIndex[i] == null ? " class='err'" : "") + ">" + htmlEscape(header[i])
+                    + "</th>");
+        }
+        out.println("</tr></thead><tbody>");
+        int shown = 0;
+        for (int r = 1; r < rows.size() && shown < 20; r++) {
+            String[] rowData = rows.get(r);
+            boolean blank = true;
+            for (String cell : rowData) {
+                if (cell != null && !cell.trim().isEmpty()) {
+                    blank = false;
+                    break;
+                }
+            }
+            if (blank) {
+                continue;
+            }
+            shown++;
+            String uri = uriIndex < rowData.length ? rowData[uriIndex] : null;
+            String status = (uri == null || uri.trim().isEmpty()) ? "<span class='badge muted'>_URI manquant</span>"
+                    : existingUris.contains(uri.trim()) ? "<span class='badge success'>Sera mise à jour</span>"
+                    : "<span class='badge muted'>_URI introuvable</span>";
+            out.println("<tr><td>" + status + "</td>");
+            for (int i = 0; i < header.length; i++) {
+                String v = i < rowData.length ? rowData[i] : "";
+                out.println("<td>" + htmlEscape(v) + "</td>");
+            }
+            out.println("</tr>");
+        }
+        out.println("</tbody></table>");
+        out.println("</div>");
+
+        if (willUpdate > 0 && !recognized.isEmpty()) {
+            String encoded = java.util.Base64.getEncoder()
+                    .encodeToString(csvContent.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=csvUpdateConfirm'>");
+            out.println("<input type='hidden' name='csvData' value='" + htmlEscape(encoded) + "'>");
+            out.println("<div class='actions'>"
+                    + "<button type='submit'>" + ICON_UPLOAD + " Confirmer la mise à jour de " + willUpdate + " soumission(s)</button> "
+                    + "<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=csvUpdate'>Annuler</a>"
+                    + "</div>");
+            out.println("</form>");
+        }
+        writeFooter(out);
+    }
+
+    /** Étape 2 : appelée seulement après confirmation explicite ; décode le CSV validé à l'étape 1 et applique les mises à jour. */
+    private void handleCsvUpdateConfirm(Connection conn, HttpServletRequest req, PrintWriter out, String formId) throws SQLException {
+        String encoded = req.getParameter("csvData");
+        String csvContent;
+        if (encoded == null || encoded.trim().isEmpty()) {
+            writeHeader(out, "Mise à jour CSV — " + formId);
+            out.println("<p class='err'>Données CSV manquantes. Merci de recommencer.</p>");
+            out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                    + "&action=csvUpdate'>&laquo; Recommencer</a></p>");
+            writeFooter(out);
+            return;
+        }
+        try {
+            csvContent = new String(java.util.Base64.getDecoder().decode(encoded), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            writeHeader(out, "Mise à jour CSV — " + formId);
+            out.println("<p class='err'>Données CSV invalides. Merci de recommencer.</p>");
+            out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                    + "&action=csvUpdate'>&laquo; Recommencer</a></p>");
+            writeFooter(out);
+            return;
+        }
+        applyCsvUpdateRows(conn, csvContent, out, formId);
+    }
+
+    /** Écrit réellement les mises à jour décrites par csvContent (appelé uniquement après confirmation de l'aperçu). */
+    private void applyCsvUpdateRows(Connection conn, String csvContent, PrintWriter out, String formId) throws SQLException {
+        writeHeader(out, "Mise à jour CSV — " + formId);
+        out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
+                + "'>&laquo; Liste des soumissions</a></p>");
+
+        String coreTable;
+        List<ColumnMeta> columns;
+        try {
+            coreTable = resolveCoreTableOrThrow(conn, formId);
+            columns = listEditableColumns(conn, coreTable);
+        } catch (SQLException e) {
+            out.println("<p class='err'>" + htmlEscape(e.getMessage()) + "</p>");
+            writeFooter(out);
+            return;
+        }
+        Map<String, ColumnMeta> byColumnName = new HashMap<String, ColumnMeta>();
+        for (ColumnMeta col : columns) {
+            byColumnName.put(col.columnName.toUpperCase(java.util.Locale.ROOT), col);
+        }
+
+        if (csvContent.length() > 0 && csvContent.charAt(0) == '﻿') {
+            csvContent = csvContent.substring(1);
+        }
+        List<String[]> rows = parseCsv(csvContent);
+        if (rows.isEmpty()) {
+            out.println("<p class='err'>Fichier CSV vide.</p>");
+            writeFooter(out);
+            return;
+        }
+
+        String[] header = rows.get(0);
+        int uriIndex = -1;
+        ColumnMeta[] columnForIndex = new ColumnMeta[header.length];
+        List<String> unrecognized = new ArrayList<String>();
+        for (int i = 0; i < header.length; i++) {
+            String h = header[i] == null ? "" : header[i].trim().toUpperCase(java.util.Locale.ROOT);
+            if ("_URI".equals(h)) {
+                uriIndex = i;
+                continue;
+            }
+            if ("_SUBMISSION_DATE".equals(h)) {
+                continue;
+            }
+            ColumnMeta col = byColumnName.get(h);
+            columnForIndex[i] = col;
+            if (col == null && !h.isEmpty()) {
+                unrecognized.add(header[i]);
+            }
+        }
+        if (uriIndex < 0) {
+            out.println("<p class='err'>Colonne _URI manquante : impossible d'identifier les soumissions à mettre à jour.</p>");
+            writeFooter(out);
+            return;
+        }
+
+        List<ColumnMeta> updateColumns = new ArrayList<ColumnMeta>();
+        List<Integer> updateIndexes = new ArrayList<Integer>();
+        for (int i = 0; i < header.length; i++) {
+            if (columnForIndex[i] != null) {
+                updateColumns.add(columnForIndex[i]);
+                updateIndexes.add(i);
+            }
+        }
+        if (updateColumns.isEmpty()) {
+            out.println("<p class='err'>Aucune colonne du fichier (en dehors de _URI) ne correspond à ce formulaire.</p>");
+            writeFooter(out);
+            return;
+        }
+
+        StringBuilder sql = new StringBuilder("UPDATE odk_prod.\"" + coreTable + "\" SET ");
+        for (ColumnMeta col : updateColumns) {
+            sql.append("\"").append(col.columnName).append("\" = ?, ");
+        }
+        sql.append("\"_LAST_UPDATE_DATE\" = now(), \"_LAST_UPDATE_URI_USER\" = ? WHERE \"_URI\" = ?");
+
+        String currentUser = SecurityContextHolder.getContext().getAuthentication() != null
+                ? SecurityContextHolder.getContext().getAuthentication().getName()
+                : "unknown";
+
+        int success = 0;
+        List<String> errors = new ArrayList<String>();
+        for (int r = 1; r < rows.size(); r++) {
+            String[] rowData = rows.get(r);
+            boolean blank = true;
+            for (String cell : rowData) {
+                if (cell != null && !cell.trim().isEmpty()) {
+                    blank = false;
+                    break;
+                }
+            }
+            if (blank) {
+                continue;
+            }
+            String uri = uriIndex < rowData.length ? rowData[uriIndex] : null;
+            if (uri == null || uri.trim().isEmpty()) {
+                errors.add("Ligne " + (r + 1) + " : _URI manquant.");
+                continue;
+            }
+            try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+                int idx = 1;
+                for (int k = 0; k < updateColumns.size(); k++) {
+                    ColumnMeta col = updateColumns.get(k);
+                    int csvIdx = updateIndexes.get(k);
+                    String rawValue = csvIdx < rowData.length ? rowData[csvIdx] : null;
+                    bindValue(ps, idx++, col, rawValue);
+                }
+                ps.setString(idx++, currentUser);
+                ps.setString(idx, uri.trim());
+                int updated = ps.executeUpdate();
+                if (updated == 0) {
+                    errors.add("Ligne " + (r + 1) + " : _URI introuvable (" + uri.trim() + ").");
+                } else {
+                    success++;
+                }
+            } catch (SQLException e) {
+                errors.add("Ligne " + (r + 1) + " : " + e.getMessage());
+            }
+        }
+
+        out.println("<div class='card'>");
+        out.println("<p class='success'><strong>" + success + "</strong> soumission(s) mise(s) à jour.</p>");
         if (!unrecognized.isEmpty()) {
             out.println("<p class='err'>Colonnes ignorées (non reconnues) : " + htmlEscape(String.join(", ", unrecognized)) + "</p>");
         }
@@ -1585,10 +2278,20 @@ public class EditSubmissionServlet extends HttpServlet {
     }
 
     private static Timestamp parseTimestamp(String value) throws SQLException {
+        String v = value.trim();
+        // Format JDBC "yyyy-MM-dd HH:mm:ss[.fffffffff]" - celui produit par Timestamp.toString()
+        // et donc utilisé par l'export CSV (streamCsvExport) : nécessaire pour que le cycle
+        // export -> modification -> réimport (mise à jour en masse) fonctionne sans y retoucher.
+        try {
+            return Timestamp.valueOf(v);
+        } catch (IllegalArgumentException ignored) {
+        }
+        // Format ISO "yyyy-MM-dd'T'HH:mm[:ss]" - celui envoyé par <input type='datetime-local'>
+        // du formulaire d'édition d'une soumission.
         String[] patterns = {"yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm"};
         for (String pattern : patterns) {
             try {
-                return new Timestamp(new SimpleDateFormat(pattern).parse(value).getTime());
+                return new Timestamp(new SimpleDateFormat(pattern).parse(v).getTime());
             } catch (ParseException ignored) {
             }
         }

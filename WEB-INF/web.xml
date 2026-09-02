@@ -394,6 +394,15 @@
 	</servlet-mapping>
 
 	<servlet>
+		<servlet-name>profile</servlet-name>
+		<servlet-class>odk.profile.ProfileServlet</servlet-class>
+	</servlet>
+	<servlet-mapping>
+		<servlet-name>profile</servlet-name>
+		<url-pattern>/profile</url-pattern>
+	</servlet-mapping>
+
+	<servlet>
 		<servlet-name>upload</servlet-name>
 		<servlet-class>org.opendatakit.aggregate.servlet.FormUploadServlet</servlet-class>
 	</servlet>

@@ -2,8 +2,15 @@ package odk.users;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -11,6 +18,7 @@ import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.sql.DataSource;
 
 import org.opendatakit.aggregate.ContextFactory;
 import org.opendatakit.common.security.client.CredentialsInfo;
@@ -21,8 +29,11 @@ import org.opendatakit.common.security.server.SecurityServiceUtil;
 import org.opendatakit.common.security.spring.CredentialsInfoBuilderInternal;
 import org.opendatakit.common.web.CallingContext;
 import org.springframework.security.authentication.encoding.MessageDigestPasswordEncoder;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.context.support.WebApplicationContextUtils;
 
 import odk.common.FormSchemaUtil;
+import odk.common.NavBar;
 
 /**
  * Admin-only tool (see /manageUsers intercept-url, ROLE_SITE_ACCESS_ADMIN)
@@ -78,6 +89,12 @@ public class UserManagementServlet extends HttpServlet {
     private static final String ICON_TRASH =
             "<svg viewBox='0 0 24 24'><path d='M4 7h16'/><path d='M9 7V4h6v3'/>"
             + "<path d='M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13'/><path d='M10 11v6M14 11v6'/></svg>";
+    private static final String ICON_LOCK =
+            "<svg viewBox='0 0 24 24'><rect x='5' y='11' width='14' height='9' rx='1.5'/>"
+            + "<path d='M8 11V7a4 4 0 0 1 8 0v4'/></svg>";
+    private static final String ICON_UNLOCK =
+            "<svg viewBox='0 0 24 24'><rect x='5' y='11' width='14' height='9' rx='1.5'/>"
+            + "<path d='M8 11V7a4 4 0 0 1 7.4-2'/></svg>";
 
     private static String trimToNull(String s) {
         if (s == null) {
@@ -130,13 +147,97 @@ public class UserManagementServlet extends HttpServlet {
         return null;
     }
 
+    private DataSource getDataSource() {
+        WebApplicationContext ctx = WebApplicationContextUtils.getWebApplicationContext(getServletContext());
+        return (DataSource) ctx.getBean("dataSource");
+    }
+
+    /**
+     * ODK n'a pas de notion native de compte "désactivé" (seulement présent/absent de la
+     * configuration de rôles). Cette table ne fait que mémoriser, à côté, si un compte est
+     * désactivé et - le cas échéant - les rôles à lui rendre lors de la réactivation ; la
+     * désactivation elle-même se fait en vidant réellement les rôles ODK du compte (donc plus
+     * aucun accès), sans jamais toucher à ses identifiants/mot de passe.
+     */
+    @Override
+    public void init() throws ServletException {
+        try (Connection conn = getDataSource().getConnection(); Statement st = conn.createStatement()) {
+            st.execute("CREATE TABLE IF NOT EXISTS odk_prod.app_user_status ("
+                    + "username VARCHAR(255) PRIMARY KEY,"
+                    + "active BOOLEAN NOT NULL DEFAULT TRUE,"
+                    + "saved_roles TEXT,"
+                    + "updated_by VARCHAR(255),"
+                    + "updated_at TIMESTAMP NOT NULL DEFAULT now())");
+            getServletContext().log("UserManagementServlet: table odk_prod.app_user_status prête.");
+        } catch (SQLException e) {
+            getServletContext().log("UserManagementServlet: échec de la création de la table app_user_status", e);
+        }
+    }
+
+    private static String rolesToStored(Set<GrantedAuthorityName> groups) {
+        if (groups == null || groups.isEmpty()) {
+            return "";
+        }
+        List<String> names = new ArrayList<String>();
+        for (GrantedAuthorityName g : groups) {
+            names.add(g.name());
+        }
+        return String.join(",", names);
+    }
+
+    private static TreeSet<GrantedAuthorityName> rolesFromStored(String stored) {
+        TreeSet<GrantedAuthorityName> groups = new TreeSet<GrantedAuthorityName>();
+        if (stored == null || stored.trim().isEmpty()) {
+            return groups;
+        }
+        for (String name : stored.split(",")) {
+            String n = name.trim();
+            if (n.isEmpty()) {
+                continue;
+            }
+            try {
+                groups.add(GrantedAuthorityName.valueOf(n));
+            } catch (IllegalArgumentException ignored) {
+                // rôle inconnu/renommé depuis la désactivation : on l'ignore plutôt que d'échouer.
+            }
+        }
+        return groups;
+    }
+
+    private Map<String, Boolean> loadActiveStatus(Connection conn) throws SQLException {
+        Map<String, Boolean> map = new HashMap<String, Boolean>();
+        try (Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT username, active FROM odk_prod.app_user_status")) {
+            while (rs.next()) {
+                map.put(rs.getString(1), rs.getBoolean(2));
+            }
+        }
+        return map;
+    }
+
+    private void setUserActive(Connection conn, String username, boolean active, String savedRoles, String updatedBy)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO odk_prod.app_user_status (username, active, saved_roles, updated_by, updated_at) "
+                        + "VALUES (?, ?, ?, ?, now()) "
+                        + "ON CONFLICT (username) DO UPDATE SET active = EXCLUDED.active, "
+                        + "saved_roles = EXCLUDED.saved_roles, updated_by = EXCLUDED.updated_by, updated_at = now()")) {
+            ps.setString(1, username);
+            ps.setBoolean(2, active);
+            ps.setString(3, savedRoles);
+            ps.setString(4, updatedBy);
+            ps.executeUpdate();
+        }
+    }
+
     private void writeHeader(PrintWriter out, String title) {
         out.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
         out.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
         out.println("<title>" + htmlEscape(title) + "</title>");
-        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css'>");
+        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css?v=" + FormSchemaUtil.ASSET_VERSION + "'>");
+        out.println("<script src='javascript/odk-tools.js?v=" + FormSchemaUtil.ASSET_VERSION + "' defer></script>");
         out.println("</head><body>");
-        out.println("<div class='topbar'><a href='home' class='topbar-link'>&laquo; Menu</a> &middot; ODK Tiipaalga &middot; Utilisateurs</div>");
+        NavBar.render(out, getServletContext(), "utilisateurs");
         out.println("<div class='container'>");
         out.println("<h2>" + htmlEscape(title) + "</h2>");
     }
@@ -172,10 +273,18 @@ public class UserManagementServlet extends HttpServlet {
                 String notice = "1".equals(req.getParameter("created")) ? "Utilisateur créé."
                         : "1".equals(req.getParameter("updated")) ? "Utilisateur mis à jour."
                         : "1".equals(req.getParameter("deleted")) ? "Utilisateur supprimé." : null;
+                if (notice == null) {
+                    notice = "1".equals(req.getParameter("deactivated")) ? "Compte désactivé."
+                            : "1".equals(req.getParameter("reactivated")) ? "Compte réactivé." : null;
+                }
                 String error = "self".equals(req.getParameter("delerr"))
                         ? "Vous ne pouvez pas supprimer votre propre compte."
                         : "super".equals(req.getParameter("delerr"))
                         ? "Le compte super-utilisateur ne peut pas être supprimé."
+                        : "self".equals(req.getParameter("acterr"))
+                        ? "Vous ne pouvez pas désactiver votre propre compte."
+                        : "super".equals(req.getParameter("acterr"))
+                        ? "Le compte super-utilisateur ne peut pas être désactivé."
                         : null;
                 renderUserList(cc, out, notice, error);
             }
@@ -194,6 +303,10 @@ public class UserManagementServlet extends HttpServlet {
             handleUpdate(cc, req, resp);
         } else if ("deleteConfirm".equals(action)) {
             handleDelete(cc, req, resp);
+        } else if ("deactivate".equals(action)) {
+            handleDeactivate(cc, req, resp);
+        } else if ("reactivate".equals(action)) {
+            handleReactivate(cc, req, resp);
         } else {
             resp.sendRedirect("manageUsers");
         }
@@ -210,16 +323,43 @@ public class UserManagementServlet extends HttpServlet {
         out.println("<div class='toolbar'><a class='btn-link' href='manageUsers?action=new'>" + ICON_PLUS
                 + " Nouvel utilisateur</a></div>");
         ArrayList<UserSecurityInfo> all = SecurityServiceUtil.getAllUsers(true, cc);
-        out.println("<table><tr><th>Nom d'utilisateur</th><th>Nom complet</th><th>Rôles</th><th></th></tr>");
+        Map<String, Boolean> activeStatus;
+        try (Connection conn = getDataSource().getConnection()) {
+            activeStatus = loadActiveStatus(conn);
+        } catch (SQLException e) {
+            activeStatus = new HashMap<String, Boolean>();
+        }
+        out.println("<div class='table-enhance'>");
+        out.println("<input type='text' class='table-search-input' placeholder='Rechercher un utilisateur...'>");
+        out.println("<table><thead><tr><th data-sortable>Nom d'utilisateur</th><th data-sortable>Nom complet</th>"
+                + "<th data-sortable>Rôles</th><th data-sortable>Statut</th><th></th></tr></thead><tbody>");
+        String currentUsername = FormSchemaUtil.currentLocalUsername();
+        String superUsername = cc.getUserService().getSuperUserUsername();
         for (UserSecurityInfo u : all) {
+            boolean active = !Boolean.FALSE.equals(activeStatus.get(u.getUsername()));
+            boolean canToggle = !u.getUsername().equals(currentUsername) && !u.getUsername().equals(superUsername);
             out.println("<tr><td>" + htmlEscape(u.getUsername()) + "</td><td>" + htmlEscape(u.getFullName()) + "</td><td>"
-                    + htmlEscape(groupsToLabel(u.getAssignedUserGroups())) + "</td><td><div class='row-actions'>"
+                    + htmlEscape(groupsToLabel(u.getAssignedUserGroups())) + "</td><td>"
+                    + (active ? "<span class='badge success'>Actif</span>" : "<span class='badge muted'>Désactivé</span>")
+                    + "</td><td><div class='row-actions'>"
                     + "<a class='btn-link' href='manageUsers?action=edit&username=" + urlEncode(u.getUsername())
-                    + "'>" + ICON_EDIT + " Modifier</a>"
-                    + "<a class='btn-link danger' href='manageUsers?action=delete&username=" + urlEncode(u.getUsername())
+                    + "'>" + ICON_EDIT + " Modifier</a>");
+            if (canToggle) {
+                if (active) {
+                    out.println("<form class='inline' method='post' action='manageUsers?action=deactivate&username="
+                            + urlEncode(u.getUsername()) + "'>"
+                            + "<button type='submit' class='btn-link danger'>" + ICON_LOCK + " Désactiver</button></form>");
+                } else {
+                    out.println("<form class='inline' method='post' action='manageUsers?action=reactivate&username="
+                            + urlEncode(u.getUsername()) + "'>"
+                            + "<button type='submit' class='btn-link'>" + ICON_UNLOCK + " Réactiver</button></form>");
+                }
+            }
+            out.println("<a class='btn-link danger' href='manageUsers?action=delete&username=" + urlEncode(u.getUsername())
                     + "'>" + ICON_TRASH + " Supprimer</a></div></td></tr>");
         }
-        out.println("</table>");
+        out.println("</tbody></table>");
+        out.println("</div>");
         writeFooter(out);
     }
 
@@ -368,6 +508,77 @@ public class UserManagementServlet extends HttpServlet {
                 SecurityServiceUtil.setStandardSiteAccessConfiguration(all, new ArrayList<GrantedAuthorityName>(), cc);
             }
             resp.sendRedirect("manageUsers?deleted=1");
+        } catch (Exception e) {
+            resp.setContentType("text/html;charset=UTF-8");
+            PrintWriter out = resp.getWriter();
+            writeHeader(out, "Utilisateurs");
+            out.println("<p class='err'>Erreur : " + htmlEscape(e.getMessage()) + "</p>");
+            writeFooter(out);
+        }
+    }
+
+    /**
+     * Désactive un compte : sauvegarde ses rôles actuels (pour la réactivation) puis les vide
+     * réellement côté ODK, ce qui lui retire tout accès sans toucher à ses identifiants. Mêmes
+     * garde-fous que la suppression (impossible sur soi-même ou sur le super-utilisateur).
+     */
+    private void handleDeactivate(CallingContext cc, HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        String username = req.getParameter("username");
+
+        String currentUsername = FormSchemaUtil.currentLocalUsername();
+        if (username != null && username.equals(currentUsername)) {
+            resp.sendRedirect("manageUsers?acterr=self");
+            return;
+        }
+        String superUsername = cc.getUserService().getSuperUserUsername();
+        if (username != null && username.equals(superUsername)) {
+            resp.sendRedirect("manageUsers?acterr=super");
+            return;
+        }
+
+        try (Connection conn = getDataSource().getConnection()) {
+            ArrayList<UserSecurityInfo> all = SecurityServiceUtil.getAllUsers(true, cc);
+            UserSecurityInfo target = findUser(all, username);
+            if (target != null) {
+                String savedRoles = rolesToStored(target.getAssignedUserGroups());
+                target.setAssignedUserGroups(new TreeSet<GrantedAuthorityName>());
+                SecurityServiceUtil.setStandardSiteAccessConfiguration(all, new ArrayList<GrantedAuthorityName>(), cc);
+                setUserActive(conn, username, false, savedRoles, currentUsername);
+            }
+            resp.sendRedirect("manageUsers?deactivated=1");
+        } catch (Exception e) {
+            resp.setContentType("text/html;charset=UTF-8");
+            PrintWriter out = resp.getWriter();
+            writeHeader(out, "Utilisateurs");
+            out.println("<p class='err'>Erreur : " + htmlEscape(e.getMessage()) + "</p>");
+            writeFooter(out);
+        }
+    }
+
+    /** Réactive un compte : lui rend les rôles qu'il avait au moment de la désactivation. */
+    private void handleReactivate(CallingContext cc, HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        String username = req.getParameter("username");
+
+        try (Connection conn = getDataSource().getConnection()) {
+            String savedRoles = null;
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT saved_roles FROM odk_prod.app_user_status WHERE username = ?")) {
+                ps.setString(1, username);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        savedRoles = rs.getString(1);
+                    }
+                }
+            }
+
+            ArrayList<UserSecurityInfo> all = SecurityServiceUtil.getAllUsers(true, cc);
+            UserSecurityInfo target = findUser(all, username);
+            if (target != null) {
+                target.setAssignedUserGroups(rolesFromStored(savedRoles));
+                SecurityServiceUtil.setStandardSiteAccessConfiguration(all, new ArrayList<GrantedAuthorityName>(), cc);
+                setUserActive(conn, username, true, null, FormSchemaUtil.currentLocalUsername());
+            }
+            resp.sendRedirect("manageUsers?reactivated=1");
         } catch (Exception e) {
             resp.setContentType("text/html;charset=UTF-8");
             PrintWriter out = resp.getWriter();

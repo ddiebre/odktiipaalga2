@@ -23,29 +23,140 @@ a:hover {
   text-decoration: underline;
 }
 
-/* ---- Bandeau superieur ---- */
+/* ---- Barre de navigation ---- */
 
-.topbar {
+.navbar {
   background: linear-gradient(135deg, #1e3a5f 0%, #17304f 100%);
   color: #fff;
-  padding: 14px 24px;
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: .2px;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
   box-shadow: 0 1px 4px rgba(0, 0, 0, .18);
 }
-.topbar-link {
+.navbar-brand {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: .2px;
+  padding: 15px 24px 15px 0;
+  white-space: nowrap;
+}
+.navbar-links {
+  display: flex;
+  flex-wrap: wrap;
+  flex: 1;
+}
+.navbar-link {
   color: #fff;
+  opacity: .78;
   text-decoration: none;
-  opacity: .85;
-  padding: 3px 6px;
-  margin-left: -6px;
-  border-radius: 5px;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 16px 14px;
+  border-bottom: 3px solid transparent;
+  white-space: nowrap;
   transition: opacity .15s, background-color .15s;
 }
-.topbar-link:hover {
+.navbar-link:hover {
   opacity: 1;
+  background: rgba(255, 255, 255, .08);
+  text-decoration: none;
+}
+.navbar-link.active {
+  opacity: 1;
+  border-bottom-color: #60a5fa;
+}
+.navbar-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  font-size: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.navbar-username {
+  opacity: .85;
+}
+.navbar-profile {
+  position: relative;
+}
+.navbar-profile-trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  appearance: none;
+  -webkit-appearance: none;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  line-height: normal;
+  cursor: pointer;
+  padding: 4px 6px;
+  margin: 0;
+  border-radius: 6px;
+  white-space: nowrap;
+  transition: background-color .15s;
+}
+.navbar-profile-trigger:hover {
+  background: rgba(255, 255, 255, .1);
+}
+.navbar-caret {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  transition: transform .15s;
+}
+.navbar-profile.open .navbar-caret {
+  transform: rotate(180deg);
+}
+.navbar-profile-menu {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 6px;
+  background: #fff;
+  color: #1f2430;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .2);
+  min-width: 190px;
+  padding: 6px;
+  z-index: 30;
+}
+.navbar-profile.open .navbar-profile-menu {
+  display: block;
+}
+.navbar-profile-menu a {
+  display: block;
+  padding: 9px 12px;
+  border-radius: 6px;
+  color: #1f2430;
+  font-size: 14px;
+  font-weight: 500;
+}
+.navbar-profile-menu a:hover {
+  background: #f3f6fb;
+  text-decoration: none;
+}
+.navbar-logout {
+  color: #fff;
   background: rgba(255, 255, 255, .12);
+  padding: 6px 12px;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 13px;
+  transition: background-color .15s;
+}
+.navbar-logout:hover {
+  background: rgba(255, 255, 255, .22);
   text-decoration: none;
 }
 
@@ -245,6 +356,37 @@ tr:hover td {
   gap: 8px;
 }
 
+.table-enhance {
+  margin-bottom: 16px;
+}
+.table-search-input {
+  display: block;
+  margin-bottom: 10px;
+  max-width: 320px;
+}
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+th.sortable:hover {
+  background: #e9eef7;
+}
+th.sortable::after {
+  content: '\2195';
+  display: inline-block;
+  margin-left: 6px;
+  opacity: .35;
+  font-size: 11px;
+}
+th.sort-asc::after {
+  content: '\2191';
+  opacity: .8;
+}
+th.sort-desc::after {
+  content: '\2193';
+  opacity: .8;
+}
+
 .pagination {
   margin-top: 16px;
   font-size: 14px;
@@ -397,6 +539,107 @@ form.inline {
   display: inline;
 }
 
+/* ---- Graphiques (inline, sans dependance JS externe) ---- */
+
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-bottom: 26px;
+}
+.chart-card {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08);
+  padding: 20px 22px;
+}
+.chart-title {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 650;
+  color: #16304f;
+}
+.bar-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bar-chart-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 34%) 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+.bar-chart-label {
+  font-size: 13px;
+  color: #374151;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bar-chart-track {
+  background: #eef2ff;
+  border-radius: 5px;
+  height: 12px;
+  overflow: hidden;
+}
+.bar-chart-fill {
+  background: linear-gradient(90deg, #2563eb, #60a5fa);
+  height: 100%;
+  border-radius: 5px;
+  min-width: 3px;
+}
+.bar-chart-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #16304f;
+  min-width: 24px;
+  text-align: right;
+}
+.line-chart {
+  width: 100%;
+  height: 150px;
+  display: block;
+}
+.line-chart-area {
+  fill: rgba(37, 99, 235, .1);
+  stroke: none;
+}
+.line-chart-line {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.line-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+/* ---- Badges de statut (ex: compte actif/désactivé) ---- */
+
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge.success {
+  background: #f0fdf4;
+  color: #15803d;
+  border: 1px solid #bbf7d0;
+}
+.badge.muted {
+  background: #f3f4f6;
+  color: #6b7280;
+  border: 1px solid #e5e7eb;
+}
+
 /* ---- Messages ---- */
 
 .err {
@@ -423,9 +666,33 @@ form.inline {
 /* ---- Responsive (mobile) ---- */
 
 @media (max-width: 640px) {
-  .topbar {
+  .navbar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0;
+  }
+  .navbar-brand {
     padding: 12px 16px;
-    font-size: 14px;
+  }
+  .navbar-links {
+    flex-direction: column;
+  }
+  .navbar-link {
+    padding: 10px 16px;
+    border-bottom: none;
+    border-left: 3px solid transparent;
+  }
+  .navbar-link.active {
+    border-left-color: #60a5fa;
+    background: rgba(255, 255, 255, .08);
+  }
+  .navbar-user {
+    padding: 10px 16px;
+    justify-content: space-between;
+  }
+  .navbar-profile-menu {
+    right: auto;
+    left: 0;
   }
   .container {
     margin: 18px auto;

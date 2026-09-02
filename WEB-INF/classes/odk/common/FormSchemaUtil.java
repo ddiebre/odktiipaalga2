@@ -5,12 +5,19 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
 
+import javax.servlet.ServletContext;
+
+import org.springframework.security.access.hierarchicalroles.RoleHierarchy;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.context.support.WebApplicationContextUtils;
 
 /**
  * Resolution du schema ODK (formId -> table "core" contenant les soumissions)
@@ -22,6 +29,15 @@ public final class FormSchemaUtil {
 
     private FormSchemaUtil() {
     }
+
+    /**
+     * Casse-cache pour stylesheets/odk-tools.css et javascript/odk-tools.js : a ajouter en
+     * parametre "?v=" sur chaque <link>/<script> qui les referencent. Change a chaque
+     * redemarrage de Tomcat (valeur figee au chargement de la classe) - evite qu'un navigateur
+     * continue de servir une version en cache de ces fichiers apres une mise a jour du code
+     * (observe : barre de navigation/graphiques non stylee malgre un Ctrl+F5).
+     */
+    public static final String ASSET_VERSION = String.valueOf(System.currentTimeMillis());
 
     public static void checkIdentifier(String identifier) throws SQLException {
         if (identifier == null || !identifier.matches("[A-Za-z0-9_]+")) {
@@ -105,6 +121,35 @@ public final class FormSchemaUtil {
         }
     }
 
+    /**
+     * Nombre de soumissions par jour sur les `days` derniers jours (aujourd'hui inclus) pour un
+     * formulaire donne. index 0 = le jour le plus ancien (aujourd'hui - days + 1), index days-1 =
+     * aujourd'hui - pratique pour sommer, jour par jour, les tableaux renvoyes pour plusieurs
+     * formulaires (cf. HomeServlet, graphique "soumissions dans le temps").
+     */
+    public static long[] dailySubmissionCounts(Connection conn, String coreTable, int days) throws SQLException {
+        checkIdentifier(coreTable);
+        long[] counts = new long[days];
+        String sql = "SELECT (CURRENT_DATE - \"_SUBMISSION_DATE\"::date) AS days_ago, COUNT(*) "
+                + "FROM odk_prod.\"" + coreTable + "\" "
+                + "WHERE \"_SUBMISSION_DATE\" >= CURRENT_DATE - ? "
+                + "GROUP BY days_ago";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, days - 1);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int daysAgo = rs.getInt(1);
+                    long count = rs.getLong(2);
+                    int index = days - 1 - daysAgo;
+                    if (index >= 0 && index < days) {
+                        counts[index] += count;
+                    }
+                }
+            }
+        }
+        return counts;
+    }
+
     /** Tous les formId connus d'ODK - sert a detecter, par difference avant/apres, le formulaire cree par un import. */
     public static Set<String> listAllFormIds(Connection conn) throws SQLException {
         String sql = "SELECT \"SUBMISSION_FORM_ID\" FROM odk_prod.\"_form_info_submission_association\"";
@@ -143,5 +188,27 @@ public final class FormSchemaUtil {
             }
         }
         return name;
+    }
+
+    /**
+     * Vrai si l'utilisateur connecte atteint le role donne via la hierarchie des roles
+     * (bean "hierarchicalRoleRelationships") - meme pattern deja utilise separement dans
+     * HomeServlet/ProjectFormListFilter/EditSubmissionMenuLinkFilter, centralise ici pour
+     * que NavBar (et tout nouveau code) n'ait pas a le redupliquer une cinquieme fois.
+     */
+    public static boolean currentUserHasRole(String role, ServletContext servletContext) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated() || auth instanceof AnonymousAuthenticationToken) {
+            return false;
+        }
+        WebApplicationContext ctx = WebApplicationContextUtils.getWebApplicationContext(servletContext);
+        RoleHierarchy roleHierarchy = (RoleHierarchy) ctx.getBean("hierarchicalRoleRelationships");
+        Collection<? extends GrantedAuthority> reachable = roleHierarchy.getReachableGrantedAuthorities(auth.getAuthorities());
+        for (GrantedAuthority a : reachable) {
+            if (role.equals(a.getAuthority())) {
+                return true;
+            }
+        }
+        return false;
     }
 }

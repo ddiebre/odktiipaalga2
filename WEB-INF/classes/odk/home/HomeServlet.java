@@ -6,9 +6,14 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
@@ -19,12 +24,12 @@ import javax.sql.DataSource;
 import org.opendatakit.aggregate.ContextFactory;
 import org.opendatakit.common.security.server.SecurityServiceUtil;
 import org.opendatakit.common.web.CallingContext;
-import org.springframework.security.access.hierarchicalroles.RoleHierarchy;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.GrantedAuthority;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
+
+import odk.common.ChartUtil;
+import odk.common.FormSchemaUtil;
+import odk.common.NavBar;
 
 /**
  * Portail /home : tableau de bord central listant les outils internes et un
@@ -130,19 +135,7 @@ public class HomeServlet extends HttpServlet {
     }
 
     private boolean currentUserHasRole(String role) {
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (auth == null || !auth.isAuthenticated()) {
-            return false;
-        }
-        WebApplicationContext ctx = WebApplicationContextUtils.getWebApplicationContext(getServletContext());
-        RoleHierarchy roleHierarchy = (RoleHierarchy) ctx.getBean("hierarchicalRoleRelationships");
-        Collection<? extends GrantedAuthority> reachable = roleHierarchy.getReachableGrantedAuthorities(auth.getAuthorities());
-        for (GrantedAuthority a : reachable) {
-            if (role.equals(a.getAuthority())) {
-                return true;
-            }
-        }
-        return false;
+        return FormSchemaUtil.currentUserHasRole(role, getServletContext());
     }
 
     private static Integer countRows(Connection conn, String sql) {
@@ -184,9 +177,10 @@ public class HomeServlet extends HttpServlet {
         out.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
         out.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
         out.println("<title>ODK Tiipaalga - Tableau de bord</title>");
-        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css'>");
+        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css?v=" + FormSchemaUtil.ASSET_VERSION + "'>");
+        out.println("<script src='javascript/odk-tools.js?v=" + FormSchemaUtil.ASSET_VERSION + "' defer></script>");
         out.println("</head><body>");
-        out.println("<div class='topbar'>ODK Tiipaalga &middot; Tableau de bord</div>");
+        NavBar.render(out, getServletContext(), "accueil");
         out.println("<div class='container'>");
         out.println("<h2>Que voulez-vous faire ?</h2>");
         out.println("<p class='info'>Vue d'ensemble et outils disponibles.</p>");
@@ -198,6 +192,8 @@ public class HomeServlet extends HttpServlet {
             out.println(statTile(ICON_USERS, userCount, "Utilisateur(s)"));
         }
         out.println("</div>");
+
+        renderCharts(out);
 
         out.println("<div class='grid'>");
         for (MenuItem item : MENU_ITEMS) {
@@ -211,6 +207,69 @@ public class HomeServlet extends HttpServlet {
         }
         out.println("</div>");
         out.println("</div></body></html>");
+    }
+
+    private static final int TREND_DAYS = 30;
+
+    /**
+     * Deux graphiques calcules a partir des memes tables de soumissions que le reste du tableau
+     * de bord (aucune donnee fictive) : une courbe "soumissions dans le temps" (somme, jour par
+     * jour, sur tous les formulaires) et un classement des formulaires les plus actifs. Ouvre sa
+     * propre connexion (comme renderUserList dans UserManagementServlet) plutot que de restructurer
+     * le bloc try-with-resources existant plus haut dans doGet.
+     */
+    private void renderCharts(PrintWriter out) {
+        try (Connection conn = getDataSource().getConnection()) {
+            Set<String> formIds = FormSchemaUtil.listAllFormIds(conn);
+            if (formIds.isEmpty()) {
+                return;
+            }
+            long[] totalDaily = new long[TREND_DAYS];
+            Map<String, Long> countsByForm = new java.util.HashMap<String, Long>();
+            for (String formId : formIds) {
+                try {
+                    String coreTable = FormSchemaUtil.resolveCoreTableOrThrow(conn, formId);
+                    FormSchemaUtil.SubmissionStats stats = FormSchemaUtil.submissionStats(conn, formId);
+                    countsByForm.put(formId, stats.count);
+                    long[] daily = FormSchemaUtil.dailySubmissionCounts(conn, coreTable, TREND_DAYS);
+                    for (int i = 0; i < TREND_DAYS; i++) {
+                        totalDaily[i] += daily[i];
+                    }
+                } catch (SQLException e) {
+                    // Formulaire indisponible (schema incomplet, etc.) - ignoré pour ce graphique.
+                }
+            }
+
+            List<Map.Entry<String, Long>> sorted = new ArrayList<Map.Entry<String, Long>>(countsByForm.entrySet());
+            sorted.sort(new Comparator<Map.Entry<String, Long>>() {
+                public int compare(Map.Entry<String, Long> a, Map.Entry<String, Long> b) {
+                    return Long.compare(b.getValue(), a.getValue());
+                }
+            });
+            LinkedHashMap<String, Long> topForms = new LinkedHashMap<String, Long>();
+            for (int i = 0; i < sorted.size() && i < 8; i++) {
+                Map.Entry<String, Long> e = sorted.get(i);
+                if (e.getValue() != null && e.getValue() > 0) {
+                    topForms.put(e.getKey(), e.getValue());
+                }
+            }
+
+            LocalDate today = LocalDate.now();
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("dd/MM");
+            List<String> labels = new ArrayList<String>();
+            labels.add(today.minusDays(TREND_DAYS - 1).format(fmt));
+            labels.add(today.format(fmt));
+
+            out.println("<div class='charts-grid'>");
+            ChartUtil.renderLineChart(out, "Soumissions des " + TREND_DAYS + " derniers jours (tous formulaires)",
+                    labels, totalDaily);
+            if (!topForms.isEmpty()) {
+                ChartUtil.renderHorizontalBarChart(out, "Formulaires les plus actifs", topForms);
+            }
+            out.println("</div>");
+        } catch (SQLException e) {
+            // Graphiques indisponibles - le tableau de bord reste utilisable sans eux.
+        }
     }
 
     private static String statTile(String icon, Integer value, String label) {

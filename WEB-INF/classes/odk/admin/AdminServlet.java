@@ -10,6 +10,9 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import odk.common.FormSchemaUtil;
+import odk.common.NavBar;
+
 /**
  * Portail /admin : page recapitulative regroupant les outils reserves aux
  * administrateurs du site (voir /admin intercept-url, ROLE_SITE_ACCESS_ADMIN).
@@ -82,9 +85,10 @@ public class AdminServlet extends HttpServlet {
         out.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
         out.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
         out.println("<title>ODK Tiipaalga - Interface admin</title>");
-        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css'>");
+        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css?v=" + FormSchemaUtil.ASSET_VERSION + "'>");
+        out.println("<script src='javascript/odk-tools.js?v=" + FormSchemaUtil.ASSET_VERSION + "' defer></script>");
         out.println("</head><body>");
-        out.println("<div class='topbar'><a href='home' class='topbar-link'>&laquo; Menu</a> &middot; ODK Tiipaalga &middot; Interface admin</div>");
+        NavBar.render(out, getServletContext(), null);
         out.println("<div class='container'>");
         out.println("<h2>Interface admin</h2>");
         out.println("<p class='info'>Outils réservés aux administrateurs du site.</p>");

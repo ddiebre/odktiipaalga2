@@ -9,6 +9,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 
@@ -30,7 +31,9 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
+import odk.common.ChartUtil;
 import odk.common.FormSchemaUtil;
+import odk.common.NavBar;
 import odk.common.FormUploadUtil;
 
 /**
@@ -147,9 +150,10 @@ public class ProjectServlet extends HttpServlet {
         out.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
         out.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
         out.println("<title>" + htmlEscape(title) + "</title>");
-        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css'>");
+        out.println("<link rel='stylesheet' href='stylesheets/odk-tools.css?v=" + FormSchemaUtil.ASSET_VERSION + "'>");
+        out.println("<script src='javascript/odk-tools.js?v=" + FormSchemaUtil.ASSET_VERSION + "' defer></script>");
         out.println("</head><body>");
-        out.println("<div class='topbar'><a href='home' class='topbar-link'>&laquo; Menu</a> &middot; ODK Tiipaalga &middot; Projets</div>");
+        NavBar.render(out, getServletContext(), "projets");
         out.println("<div class='container'>");
         out.println("<h2>" + htmlEscape(title) + "</h2>");
     }
@@ -598,7 +602,32 @@ public class ProjectServlet extends HttpServlet {
         if (formIds.isEmpty()) {
             out.println("<p class='info'>Aucun formulaire rattaché à ce projet.</p>");
         } else {
-            out.println("<table><tr><th>Formulaire</th><th>Soumissions</th><th>Dernière soumission</th><th></th></tr>");
+            LinkedHashMap<String, Long> formCounts = new LinkedHashMap<String, Long>();
+            for (String formId : formIds) {
+                try {
+                    formCounts.put(formId, FormSchemaUtil.submissionStats(conn, formId).count);
+                } catch (SQLException e) {
+                    // Formulaire introuvable (peut-être supprimé) - ignoré pour ce graphique,
+                    // le message d'erreur reste visible dans la table ci-dessous.
+                }
+            }
+            boolean hasSubmissions = false;
+            for (Long v : formCounts.values()) {
+                if (v != null && v > 0) {
+                    hasSubmissions = true;
+                    break;
+                }
+            }
+            if (hasSubmissions) {
+                out.println("<div class='charts-grid'>");
+                ChartUtil.renderHorizontalBarChart(out, "Soumissions par formulaire", formCounts);
+                out.println("</div>");
+            }
+
+            out.println("<div class='table-enhance'>");
+            out.println("<input type='text' class='table-search-input' placeholder='Rechercher un formulaire...'>");
+            out.println("<table><thead><tr><th data-sortable>Formulaire</th><th data-sortable>Soumissions</th>"
+                    + "<th data-sortable>Dernière soumission</th><th></th></tr></thead><tbody>");
             for (String formId : formIds) {
                 out.println("<tr>");
                 try {
@@ -618,7 +647,8 @@ public class ProjectServlet extends HttpServlet {
                         + "</div></td>");
                 out.println("</tr>");
             }
-            out.println("</table>");
+            out.println("</tbody></table>");
+            out.println("</div>");
         }
 
         out.println("<h2 style='margin-top:32px;'>Agents de collecte affectés</h2>");
@@ -628,14 +658,17 @@ public class ProjectServlet extends HttpServlet {
         if (collectors.isEmpty()) {
             out.println("<p class='info'>Aucun agent affecté à ce projet.</p>");
         } else {
-            out.println("<table><tr><th>Nom d'utilisateur</th><th></th></tr>");
+            out.println("<div class='table-enhance'>");
+            out.println("<input type='text' class='table-search-input' placeholder='Rechercher un agent...'>");
+            out.println("<table><thead><tr><th data-sortable>Nom d'utilisateur</th><th></th></tr></thead><tbody>");
             for (String username : collectors) {
                 out.println("<tr><td>" + htmlEscape(username) + "</td><td>"
                         + "<form class='inline' method='post' action='project?projectId=" + project.id + "&action=removeCollector'>"
                         + "<input type='hidden' name='username' value='" + htmlEscape(username) + "'>"
                         + "<button type='submit' class='btn-link danger'>" + ICON_TRASH + " Retirer</button></form></td></tr>");
             }
-            out.println("</table>");
+            out.println("</tbody></table>");
+            out.println("</div>");
         }
         writeFooter(out);
     }
