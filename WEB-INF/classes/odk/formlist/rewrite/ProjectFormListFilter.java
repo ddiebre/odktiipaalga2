@@ -4,11 +4,8 @@ import java.io.IOException;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.Set;
 
 import javax.servlet.Filter;
@@ -97,21 +94,15 @@ public class ProjectFormListFilter implements Filter {
         return FormSchemaUtil.currentLocalUsername();
     }
 
+    /**
+     * Délègue à FormSchemaUtil.listFormsVisibleToViewer, qui gère aussi la hiérarchie de
+     * sous-projets (un collecteur affecté à un sous-projet voit, sur ODK Collect, les formulaires
+     * hérités de la lignée de projets parents et ceux agrégés de ses propres sous-projets).
+     */
     private Set<String> allowedFormIds(String username) throws SQLException {
-        String sql = "SELECT DISTINCT pf.form_id FROM odk_prod.app_project_form pf "
-                + "JOIN odk_prod.app_project_user pu ON pu.project_id = pf.project_id "
-                + "WHERE pu.username = ?";
-        Set<String> ids = new HashSet<String>();
-        try (Connection conn = getDataSource().getConnection();
-                PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, username);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    ids.add(rs.getString(1));
-                }
-            }
+        try (Connection conn = getDataSource().getConnection()) {
+            return FormSchemaUtil.listFormsVisibleToViewer(conn, username);
         }
-        return ids;
     }
 
     @Override

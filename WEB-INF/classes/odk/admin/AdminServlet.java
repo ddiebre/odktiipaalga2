@@ -45,6 +45,8 @@ public class AdminServlet extends HttpServlet {
     private static final String ICON_GRID =
             "<svg viewBox='0 0 24 24'><rect x='3' y='3' width='7' height='7' rx='1.2'/><rect x='14' y='3' width='7' height='7' rx='1.2'/>"
             + "<rect x='3' y='14' width='7' height='7' rx='1.2'/><rect x='14' y='14' width='7' height='7' rx='1.2'/></svg>";
+    private static final String ICON_LOG =
+            "<svg viewBox='0 0 24 24'><path d='M4 4h16v16H4z'/><path d='M8 9h8M8 13h8M8 17h5'/></svg>";
 
     private static final List<MenuItem> MENU_ITEMS = new ArrayList<MenuItem>();
     static {
@@ -53,6 +55,11 @@ public class AdminServlet extends HttpServlet {
                 "Créer des comptes, modifier leurs rôles, réinitialiser un mot de passe, supprimer un compte.",
                 "manageUsers",
                 ICON_USERS));
+        MENU_ITEMS.add(new MenuItem(
+                "Journal d'activité",
+                "Historique des créations/modifications/suppressions de formulaires, projets, utilisateurs et soumissions.",
+                "activity",
+                ICON_LOG));
         MENU_ITEMS.add(new MenuItem(
                 "Projets",
                 "Regrouper des formulaires par projet et suivre le nombre de soumissions de chacun.",

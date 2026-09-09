@@ -11,7 +11,7 @@ if not exist "%SERVLET_JAR%" (
 )
 
 cd /d "%~dp0"
-javac -encoding UTF-8 -cp "%SERVLET_JAR%;%LIB_DIR%\*" FormSchemaUtil.java FormUploadUtil.java XlsFormConverter.java FormDeletionUtil.java NavBar.java ChartUtil.java
+javac -encoding UTF-8 -cp "%SERVLET_JAR%;%LIB_DIR%\*" FormSchemaUtil.java FormUploadUtil.java XlsFormConverter.java FormDeletionUtil.java NavBar.java ChartUtil.java XlsxWriter.java ActivityLog.java
 if %ERRORLEVEL% equ 0 (
     echo Compilation reussie.
 ) else (

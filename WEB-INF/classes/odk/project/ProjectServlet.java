@@ -11,6 +11,7 @@ import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.servlet.ServletException;
@@ -31,6 +32,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
+import odk.common.ActivityLog;
 import odk.common.ChartUtil;
 import odk.common.FormSchemaUtil;
 import odk.common.NavBar;
@@ -53,13 +55,15 @@ public class ProjectServlet extends HttpServlet {
         final String description;
         final Timestamp createdAt;
         final int formCount;
+        final Integer parentId;
 
-        ProjectSummary(int id, String name, String description, Timestamp createdAt, int formCount) {
+        ProjectSummary(int id, String name, String description, Timestamp createdAt, int formCount, Integer parentId) {
             this.id = id;
             this.name = name;
             this.description = description;
             this.createdAt = createdAt;
             this.formCount = formCount;
+            this.parentId = parentId;
         }
     }
 
@@ -67,11 +71,13 @@ public class ProjectServlet extends HttpServlet {
         final int id;
         final String name;
         final String description;
+        final Integer parentId;
 
-        Project(int id, String name, String description) {
+        Project(int id, String name, String description, Integer parentId) {
             this.id = id;
             this.name = name;
             this.description = description;
+            this.parentId = parentId;
         }
     }
 
@@ -90,6 +96,11 @@ public class ProjectServlet extends HttpServlet {
                     + "created_by VARCHAR(255),"
                     + "created_at TIMESTAMP NOT NULL DEFAULT now(),"
                     + "updated_at TIMESTAMP NOT NULL DEFAULT now())");
+            // Sous-projets : parent_id nullable (NULL = projet racine). Ajoutee separement (ALTER)
+            // car app_project existait deja avant cette fonctionnalite.
+            st.execute("ALTER TABLE odk_prod.app_project ADD COLUMN IF NOT EXISTS "
+                    + "parent_id INTEGER REFERENCES odk_prod.app_project(id) ON DELETE SET NULL");
+            st.execute("CREATE INDEX IF NOT EXISTS app_project_parent_id_idx ON odk_prod.app_project(parent_id)");
             st.execute("CREATE TABLE IF NOT EXISTS odk_prod.app_project_form ("
                     + "id SERIAL PRIMARY KEY,"
                     + "project_id INTEGER NOT NULL REFERENCES odk_prod.app_project(id) ON DELETE CASCADE,"
@@ -162,18 +173,41 @@ public class ProjectServlet extends HttpServlet {
         out.println("</div></body></html>");
     }
 
+    /**
+     * ROLE_DATA_VIEWER (Lecteur de données) peut désormais accéder à /project (voir l'intercept-url)
+     * pour consulter, mais la création/modification/suppression de projets et leurs rattachements
+     * restent réservées à ROLE_DATA_OWNER (Gestionnaire de formulaires).
+     */
+    private boolean isDataOwner() {
+        return FormSchemaUtil.currentUserHasRole("ROLE_DATA_OWNER", getServletContext());
+    }
+
+    private void renderAccessDenied(PrintWriter out, String backHref, String backLabel) {
+        writeHeader(out, "Accès refusé");
+        out.println("<p class='err'>Votre rôle (Lecteur de données) permet de consulter, "
+                + "mais pas de créer, modifier ou supprimer.</p>");
+        out.println("<p class='back-link'><a href='" + backHref + "'>&laquo; " + htmlEscape(backLabel) + "</a></p>");
+        writeFooter(out);
+    }
+
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
         String action = req.getParameter("action");
         Integer projectId = parseProjectId(req.getParameter("projectId"));
+        boolean canManage = isDataOwner();
         try (Connection conn = getDataSource().getConnection()) {
             resp.setContentType("text/html;charset=UTF-8");
             PrintWriter out = resp.getWriter();
             if (projectId == null) {
                 if ("new".equals(action)) {
-                    renderProjectForm(out, null, null);
+                    if (!canManage) {
+                        renderAccessDenied(out, "project", "Projets");
+                        return;
+                    }
+                    Integer prefillParentId = parseProjectId(req.getParameter("parentId"));
+                    renderProjectForm(conn, out, null, null, prefillParentId);
                 } else {
-                    renderProjectList(conn, out);
+                    renderProjectList(conn, out, canManage);
                 }
                 return;
             }
@@ -182,8 +216,19 @@ public class ProjectServlet extends HttpServlet {
                 out.println("<p class='err'>Projet introuvable.</p>");
                 return;
             }
+            if (!canManage && !FormSchemaUtil.isProjectAccessibleToViewer(conn, projectId, FormSchemaUtil.currentLocalUsername())) {
+                renderAccessDenied(out, "project", "Projets");
+                return;
+            }
+            if ("edit".equals(action) || "addForm".equals(action) || "addCollector".equals(action)
+                    || "importXml".equals(action) || "delete".equals(action)) {
+                if (!canManage) {
+                    renderAccessDenied(out, "project?projectId=" + projectId, project.name);
+                    return;
+                }
+            }
             if ("edit".equals(action)) {
-                renderProjectForm(out, project, null);
+                renderProjectForm(conn, out, project, null, project.parentId);
             } else if ("addForm".equals(action)) {
                 renderAddFormPicker(conn, out, project);
             } else if ("addCollector".equals(action)) {
@@ -200,7 +245,7 @@ public class ProjectServlet extends HttpServlet {
                         ? "Le formulaire a été importé dans ODK mais n'a pas pu être rattaché automatiquement. "
                                 + "Utilisez « Ajouter un formulaire » pour le sélectionner."
                         : null;
-                renderProjectDetail(conn, out, project, err, notice);
+                renderProjectDetail(conn, out, project, err, notice, canManage);
             }
         } catch (SQLException e) {
             throw new ServletException(e);
@@ -211,16 +256,30 @@ public class ProjectServlet extends HttpServlet {
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
         String action = req.getParameter("action");
         Integer projectId = parseProjectId(req.getParameter("projectId"));
+        // Toutes les actions POST de ce servlet ecrivent en base (creation/modification/suppression
+        // de projets ou de leurs rattachements) - reservees a ROLE_DATA_OWNER.
+        if (!isDataOwner()) {
+            resp.sendError(HttpServletResponse.SC_FORBIDDEN,
+                    "Action non autorisée pour votre rôle (Lecteur de données : consultation uniquement).");
+            return;
+        }
         try (Connection conn = getDataSource().getConnection()) {
             if ("create".equals(action)) {
                 String name = req.getParameter("name");
                 String description = req.getParameter("description");
+                Integer parentId = parseProjectId(req.getParameter("parentId"));
                 if (name == null || name.trim().isEmpty()) {
                     resp.setContentType("text/html;charset=UTF-8");
-                    renderProjectForm(resp.getWriter(), null, "Le nom du projet est obligatoire.");
+                    renderProjectForm(conn, resp.getWriter(), null, "Le nom du projet est obligatoire.", parentId);
                     return;
                 }
-                int newId = insertProject(conn, name.trim(), description, currentUserName());
+                if (parentId != null && getProject(conn, parentId) == null) {
+                    resp.setContentType("text/html;charset=UTF-8");
+                    renderProjectForm(conn, resp.getWriter(), null, "Projet parent introuvable.", null);
+                    return;
+                }
+                int newId = insertProject(conn, name.trim(), description, currentUserName(), parentId);
+                ActivityLog.record(conn, "project.create", "projet", String.valueOf(newId), "Nom : " + name.trim());
                 resp.sendRedirect("project?projectId=" + newId);
                 return;
             }
@@ -236,41 +295,66 @@ public class ProjectServlet extends HttpServlet {
             if ("update".equals(action)) {
                 String name = req.getParameter("name");
                 String description = req.getParameter("description");
+                Integer parentId = parseProjectId(req.getParameter("parentId"));
                 if (name == null || name.trim().isEmpty()) {
                     resp.setContentType("text/html;charset=UTF-8");
-                    renderProjectForm(resp.getWriter(), project, "Le nom du projet est obligatoire.");
+                    renderProjectForm(conn, resp.getWriter(), project, "Le nom du projet est obligatoire.", parentId);
                     return;
                 }
-                updateProject(conn, projectId, name.trim(), description);
+                if (parentId != null) {
+                    if (parentId.intValue() == projectId.intValue()
+                            || FormSchemaUtil.descendantProjectIds(conn, projectId).contains(parentId)) {
+                        resp.setContentType("text/html;charset=UTF-8");
+                        renderProjectForm(conn, resp.getWriter(), project,
+                                "Le projet parent ne peut pas être ce projet lui-même ni l'un de ses sous-projets.", parentId);
+                        return;
+                    }
+                    if (getProject(conn, parentId) == null) {
+                        resp.setContentType("text/html;charset=UTF-8");
+                        renderProjectForm(conn, resp.getWriter(), project, "Projet parent introuvable.", parentId);
+                        return;
+                    }
+                }
+                updateProject(conn, projectId, name.trim(), description, parentId);
+                ActivityLog.record(conn, "project.update", "projet", String.valueOf(projectId), "Nom : " + name.trim());
                 resp.sendRedirect("project?projectId=" + projectId);
             } else if ("addForm".equals(action)) {
                 String formId = req.getParameter("formId");
                 if (formId != null && !formId.trim().isEmpty()) {
                     addFormToProject(conn, projectId, formId.trim(), currentUserName());
+                    ActivityLog.record(conn, "project.form.add", "projet", String.valueOf(projectId),
+                            "Formulaire ajouté : " + formId.trim());
                 }
                 resp.sendRedirect("project?projectId=" + projectId);
             } else if ("removeForm".equals(action)) {
                 String formId = req.getParameter("formId");
                 if (formId != null) {
                     removeFormFromProject(conn, projectId, formId);
+                    ActivityLog.record(conn, "project.form.remove", "projet", String.valueOf(projectId),
+                            "Formulaire retiré : " + formId);
                 }
                 resp.sendRedirect("project?projectId=" + projectId);
             } else if ("addCollector".equals(action)) {
                 String username = req.getParameter("username");
                 if (username != null && !username.trim().isEmpty()) {
                     addCollectorToProject(conn, projectId, username.trim(), currentUserName());
+                    ActivityLog.record(conn, "project.user.add", "projet", String.valueOf(projectId),
+                            "Utilisateur affecté : " + username.trim());
                 }
                 resp.sendRedirect("project?projectId=" + projectId);
             } else if ("removeCollector".equals(action)) {
                 String username = req.getParameter("username");
                 if (username != null) {
                     removeCollectorFromProject(conn, projectId, username);
+                    ActivityLog.record(conn, "project.user.remove", "projet", String.valueOf(projectId),
+                            "Utilisateur retiré : " + username);
                 }
                 resp.sendRedirect("project?projectId=" + projectId);
             } else if ("importXml".equals(action)) {
                 handleImportXml(conn, req, resp, project);
             } else if ("deleteConfirm".equals(action)) {
                 deleteProject(conn, projectId);
+                ActivityLog.record(conn, "project.delete", "projet", String.valueOf(projectId), "Nom : " + project.name);
                 resp.sendRedirect("project");
             } else {
                 resp.sendRedirect("project?projectId=" + projectId);
@@ -294,28 +378,31 @@ public class ProjectServlet extends HttpServlet {
     // ---- Acces donnees -----------------------------------------------------------------------
 
     private static List<ProjectSummary> listProjects(Connection conn) throws SQLException {
-        String sql = "SELECT p.id, p.name, p.description, p.created_at, COUNT(f.id) "
+        String sql = "SELECT p.id, p.name, p.description, p.created_at, COUNT(f.id), p.parent_id "
                 + "FROM odk_prod.app_project p "
                 + "LEFT JOIN odk_prod.app_project_form f ON f.project_id = p.id "
-                + "GROUP BY p.id, p.name, p.description, p.created_at "
+                + "GROUP BY p.id, p.name, p.description, p.created_at, p.parent_id "
                 + "ORDER BY p.name";
         List<ProjectSummary> result = new ArrayList<ProjectSummary>();
         try (PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
+                int parentId = rs.getInt(6);
                 result.add(new ProjectSummary(rs.getInt(1), rs.getString(2), rs.getString(3),
-                        rs.getTimestamp(4), rs.getInt(5)));
+                        rs.getTimestamp(4), rs.getInt(5), rs.wasNull() ? null : Integer.valueOf(parentId)));
             }
         }
         return result;
     }
 
     private static Project getProject(Connection conn, int id) throws SQLException {
-        String sql = "SELECT id, name, description FROM odk_prod.app_project WHERE id = ?";
+        String sql = "SELECT id, name, description, parent_id FROM odk_prod.app_project WHERE id = ?";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, id);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
-                    return new Project(rs.getInt(1), rs.getString(2), rs.getString(3));
+                    int parentId = rs.getInt(4);
+                    return new Project(rs.getInt(1), rs.getString(2), rs.getString(3),
+                            rs.wasNull() ? null : Integer.valueOf(parentId));
                 }
             }
         }
@@ -354,12 +441,18 @@ public class ProjectServlet extends HttpServlet {
         return forms;
     }
 
-    private static int insertProject(Connection conn, String name, String description, String creator) throws SQLException {
-        String sql = "INSERT INTO odk_prod.app_project(name, description, created_by) VALUES (?,?,?) RETURNING id";
+    private static int insertProject(Connection conn, String name, String description, String creator, Integer parentId)
+            throws SQLException {
+        String sql = "INSERT INTO odk_prod.app_project(name, description, created_by, parent_id) VALUES (?,?,?,?) RETURNING id";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, name);
             ps.setString(2, description);
             ps.setString(3, creator);
+            if (parentId != null) {
+                ps.setInt(4, parentId);
+            } else {
+                ps.setNull(4, java.sql.Types.INTEGER);
+            }
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getInt(1);
@@ -367,12 +460,56 @@ public class ProjectServlet extends HttpServlet {
         }
     }
 
-    private static void updateProject(Connection conn, int id, String name, String description) throws SQLException {
-        String sql = "UPDATE odk_prod.app_project SET name = ?, description = ?, updated_at = now() WHERE id = ?";
+    /** Les sous-projets directs d'un projet (pas les petits-enfants). */
+    private static List<ProjectSummary> listChildProjects(Connection conn, int projectId) throws SQLException {
+        String sql = "SELECT p.id, p.name, p.description, p.created_at, COUNT(f.id), p.parent_id "
+                + "FROM odk_prod.app_project p "
+                + "LEFT JOIN odk_prod.app_project_form f ON f.project_id = p.id "
+                + "WHERE p.parent_id = ? "
+                + "GROUP BY p.id, p.name, p.description, p.created_at, p.parent_id "
+                + "ORDER BY p.name";
+        List<ProjectSummary> result = new ArrayList<ProjectSummary>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, projectId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int parentId = rs.getInt(6);
+                    result.add(new ProjectSummary(rs.getInt(1), rs.getString(2), rs.getString(3),
+                            rs.getTimestamp(4), rs.getInt(5), rs.wasNull() ? null : Integer.valueOf(parentId)));
+                }
+            }
+        }
+        return result;
+    }
+
+    /** La lignée d'un projet, de la racine jusqu'à son parent direct (pas le projet lui-même) - pour le fil d'Ariane. */
+    private List<Project> ancestorChain(Connection conn, Project project) throws SQLException {
+        List<Project> chain = new ArrayList<Project>();
+        Integer pid = project.parentId;
+        Set<Integer> seen = new java.util.HashSet<Integer>();
+        while (pid != null && seen.add(pid)) {
+            Project ancestor = getProject(conn, pid);
+            if (ancestor == null) {
+                break;
+            }
+            chain.add(0, ancestor);
+            pid = ancestor.parentId;
+        }
+        return chain;
+    }
+
+    private static void updateProject(Connection conn, int id, String name, String description, Integer parentId)
+            throws SQLException {
+        String sql = "UPDATE odk_prod.app_project SET name = ?, description = ?, parent_id = ?, updated_at = now() WHERE id = ?";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, name);
             ps.setString(2, description);
-            ps.setInt(3, id);
+            if (parentId != null) {
+                ps.setInt(3, parentId);
+            } else {
+                ps.setNull(3, java.sql.Types.INTEGER);
+            }
+            ps.setInt(4, id);
             ps.executeUpdate();
         }
     }
@@ -411,13 +548,20 @@ public class ProjectServlet extends HttpServlet {
         return usernames;
     }
 
-    /** Comptes ROLE_DATA_COLLECTOR (groupe GROUP_DATA_COLLECTORS) pas encore affectes a ce projet. */
+    /**
+     * Comptes pas encore affectés à ce projet, parmi ceux pour qui l'affectation a un effet réel :
+     * GROUP_DATA_COLLECTORS (filtre les formulaires visibles sur ODK Collect) ou GROUP_DATA_VIEWERS
+     * (restreint, côté interface web, les projets/formulaires/soumissions visibles - voir
+     * FormSchemaUtil.isFormAccessibleToViewer/isProjectAccessibleToViewer).
+     */
     private static List<String> listAddableCollectors(Connection conn, int projectId, CallingContext cc) throws Exception {
         List<String> assigned = listAssignedCollectors(conn, projectId);
         ArrayList<UserSecurityInfo> all = SecurityServiceUtil.getAllUsers(true, cc);
         List<String> addable = new ArrayList<String>();
         for (UserSecurityInfo u : all) {
-            if (u.getAssignedUserGroups() != null && u.getAssignedUserGroups().contains(GrantedAuthorityName.GROUP_DATA_COLLECTORS)
+            if (u.getAssignedUserGroups() != null
+                    && (u.getAssignedUserGroups().contains(GrantedAuthorityName.GROUP_DATA_COLLECTORS)
+                            || u.getAssignedUserGroups().contains(GrantedAuthorityName.GROUP_DATA_VIEWERS))
                     && !assigned.contains(u.getUsername())) {
                 addable.add(u.getUsername());
             }
@@ -512,6 +656,8 @@ public class ProjectServlet extends HttpServlet {
             if (after.size() == 1) {
                 String newFormId = after.iterator().next();
                 addFormToProject(conn, project.id, newFormId, currentUserName());
+                ActivityLog.record(conn, "form.import", "formulaire", newFormId,
+                        "Importé et rattaché au projet " + project.name);
                 resp.sendRedirect("project?projectId=" + project.id + "&imported=1");
             } else {
                 resp.sendRedirect("project?projectId=" + project.id + "&imported=partial");
@@ -530,27 +676,72 @@ public class ProjectServlet extends HttpServlet {
 
     // ---- Rendu ---------------------------------------------------------------------------------
 
-    private void renderProjectList(Connection conn, PrintWriter out) throws SQLException {
+    private void renderProjectList(Connection conn, PrintWriter out, boolean canManage) throws SQLException {
         writeHeader(out, "Projets");
-        out.println("<div class='toolbar'><a class='btn-link' href='project?action=new'>" + ICON_PLUS + " Nouveau projet</a></div>");
+        if (canManage) {
+            out.println("<div class='toolbar'><a class='btn-link' href='project?action=new'>" + ICON_PLUS + " Nouveau projet</a></div>");
+        }
         List<ProjectSummary> projects = listProjects(conn);
-        if (projects.isEmpty()) {
-            out.println("<p class='info'>Aucun projet pour le moment.</p>");
-        } else {
-            out.println("<ul class='list'>");
+        if (!canManage) {
+            Set<Integer> visible = FormSchemaUtil.listProjectsVisibleToViewer(conn, FormSchemaUtil.currentLocalUsername());
+            List<ProjectSummary> filtered = new ArrayList<ProjectSummary>();
             for (ProjectSummary p : projects) {
-                out.println("<li><a href='project?projectId=" + p.id + "'><strong>" + htmlEscape(p.name) + "</strong>"
-                        + "<div class='muted'>" + p.formCount + " formulaire(s)"
-                        + (p.description != null && !p.description.trim().isEmpty()
-                                ? " &middot; " + htmlEscape(p.description) : "")
-                        + "</div></a></li>");
+                if (visible.contains(p.id)) {
+                    filtered.add(p);
+                }
+            }
+            projects = filtered;
+        }
+        if (projects.isEmpty()) {
+            out.println("<p class='info'>" + (canManage ? "Aucun projet pour le moment."
+                    : "Aucun projet visible : vous n'êtes affecté à aucun projet.") + "</p>");
+        } else {
+            Map<Integer, ProjectSummary> byId = new LinkedHashMap<Integer, ProjectSummary>();
+            for (ProjectSummary p : projects) {
+                byId.put(p.id, p);
+            }
+            Map<Integer, List<ProjectSummary>> childrenOf = new LinkedHashMap<Integer, List<ProjectSummary>>();
+            List<ProjectSummary> roots = new ArrayList<ProjectSummary>();
+            for (ProjectSummary p : projects) {
+                if (p.parentId != null && byId.containsKey(p.parentId)) {
+                    List<ProjectSummary> siblings = childrenOf.get(p.parentId);
+                    if (siblings == null) {
+                        siblings = new ArrayList<ProjectSummary>();
+                        childrenOf.put(p.parentId, siblings);
+                    }
+                    siblings.add(p);
+                } else {
+                    roots.add(p);
+                }
+            }
+            out.println("<ul class='list'>");
+            for (ProjectSummary root : roots) {
+                renderProjectTreeItem(out, root, childrenOf, 0);
             }
             out.println("</ul>");
         }
         writeFooter(out);
     }
 
-    private void renderProjectForm(PrintWriter out, Project project, String error) {
+    /** Affiche un projet et récursivement ses sous-projets, indentés, dans le <ul class='list'> de la liste des projets. */
+    private void renderProjectTreeItem(PrintWriter out, ProjectSummary p, Map<Integer, List<ProjectSummary>> childrenOf,
+            int depth) {
+        out.println("<li style='" + (depth > 0 ? "margin-left:" + (depth * 22) + "px;" : "") + "'>"
+                + "<a href='project?projectId=" + p.id + "'><strong>" + htmlEscape(p.name) + "</strong>"
+                + "<div class='muted'>" + p.formCount + " formulaire(s)"
+                + (p.description != null && !p.description.trim().isEmpty()
+                        ? " &middot; " + htmlEscape(p.description) : "")
+                + "</div></a></li>");
+        List<ProjectSummary> kids = childrenOf.get(p.id);
+        if (kids != null) {
+            for (ProjectSummary k : kids) {
+                renderProjectTreeItem(out, k, childrenOf, depth + 1);
+            }
+        }
+    }
+
+    private void renderProjectForm(Connection conn, PrintWriter out, Project project, String error, Integer selectedParentId)
+            throws SQLException {
         boolean editing = project != null;
         writeHeader(out, editing ? "Modifier le projet" : "Nouveau projet");
         out.println("<p class='back-link'><a href='project" + (editing ? "?projectId=" + project.id : "")
@@ -558,6 +749,17 @@ public class ProjectServlet extends HttpServlet {
         if (error != null) {
             out.println("<p class='err'>" + htmlEscape(error) + "</p>");
         }
+
+        // Projets parents possibles : tous sauf, en édition, ce projet lui-même et ses propres
+        // sous-projets (empêcherait de créer un cycle dans l'arbre).
+        Set<Integer> excluded = editing ? FormSchemaUtil.descendantProjectIds(conn, project.id) : java.util.Collections.<Integer>emptySet();
+        List<ProjectSummary> candidateParents = new ArrayList<ProjectSummary>();
+        for (ProjectSummary p : listProjects(conn)) {
+            if (!excluded.contains(p.id)) {
+                candidateParents.add(p);
+            }
+        }
+
         out.println("<div class='card'>");
         out.println("<form method='post' action='project?" + (editing ? "projectId=" + project.id + "&action=update" : "action=create") + "'>");
         out.println("<div class='form-grid'>");
@@ -565,7 +767,17 @@ public class ProjectServlet extends HttpServlet {
                 + htmlEscape(editing ? project.name : "") + "' required>");
         out.println("<label>Description</label><textarea name='description'>"
                 + htmlEscape(editing && project.description != null ? project.description : "") + "</textarea>");
+        out.println("<label>Projet parent</label><select name='parentId'>");
+        out.println("<option value=''" + (selectedParentId == null ? " selected" : "") + ">— Aucun (projet racine) —</option>");
+        for (ProjectSummary p : candidateParents) {
+            boolean sel = selectedParentId != null && selectedParentId == p.id;
+            out.println("<option value='" + p.id + "'" + (sel ? " selected" : "") + ">" + htmlEscape(p.name) + "</option>");
+        }
+        out.println("</select>");
         out.println("</div>");
+        out.println("<p class='info'>Un sous-projet hérite des formulaires et utilisateurs affectés de sa lignée de "
+                + "projets parents ; le projet parent, lui, agrège automatiquement les soumissions/graphiques/médias de "
+                + "tous ses sous-projets.</p>");
         out.println("<div class='actions'><button type='submit'>" + (editing ? "Enregistrer" : ICON_PLUS + " Créer le projet")
                 + "</button></div>");
         out.println("</form>");
@@ -573,10 +785,20 @@ public class ProjectServlet extends HttpServlet {
         writeFooter(out);
     }
 
-    private void renderProjectDetail(Connection conn, PrintWriter out, Project project, String error, String notice)
-            throws SQLException {
+    private void renderProjectDetail(Connection conn, PrintWriter out, Project project, String error, String notice,
+            boolean canManage) throws SQLException {
         writeHeader(out, project.name);
         out.println("<p class='back-link'><a href='project'>&laquo; Liste des projets</a></p>");
+
+        List<Project> ancestors = ancestorChain(conn, project);
+        if (!ancestors.isEmpty()) {
+            StringBuilder crumb = new StringBuilder();
+            for (Project a : ancestors) {
+                crumb.append("<a href='project?projectId=").append(a.id).append("'>").append(htmlEscape(a.name))
+                        .append("</a> &raquo; ");
+            }
+            out.println("<p class='info'>" + crumb + htmlEscape(project.name) + "</p>");
+        }
         if (error != null) {
             out.println("<p class='err'>" + htmlEscape(error) + "</p>");
         }
@@ -586,29 +808,54 @@ public class ProjectServlet extends HttpServlet {
         if (project.description != null && !project.description.trim().isEmpty()) {
             out.println("<p class='info'>" + htmlEscape(project.description) + "</p>");
         }
-        out.println("<div class='toolbar'>");
-        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=edit'>" + ICON_EDIT + " Modifier</a>");
-        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=addForm'>" + ICON_PLUS
-                + " Ajouter un formulaire</a>");
-        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=importXml'>" + ICON_UPLOAD
-                + " Importer un formulaire XML</a>");
-        out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=addCollector'>" + ICON_USERS
-                + " Affecter un agent</a>");
-        out.println("<a class='btn-link danger' href='project?projectId=" + project.id + "&action=delete'>" + ICON_TRASH
-                + " Supprimer le projet</a>");
-        out.println("</div>");
+        if (canManage) {
+            out.println("<div class='toolbar'>");
+            out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=edit'>" + ICON_EDIT + " Modifier</a>");
+            out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=addForm'>" + ICON_PLUS
+                    + " Ajouter un formulaire</a>");
+            out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=importXml'>" + ICON_UPLOAD
+                    + " Importer un formulaire XML</a>");
+            out.println("<a class='btn-link' href='project?projectId=" + project.id + "&action=addCollector'>" + ICON_USERS
+                    + " Affecter un utilisateur</a>");
+            out.println("<a class='btn-link' href='project?action=new&parentId=" + project.id + "'>" + ICON_PLUS
+                    + " Créer un sous-projet</a>");
+            out.println("<a class='btn-link danger' href='project?projectId=" + project.id + "&action=delete'>" + ICON_TRASH
+                    + " Supprimer le projet</a>");
+            out.println("</div>");
+        }
 
-        List<String> formIds = listAttachedForms(conn, project.id);
-        if (formIds.isEmpty()) {
-            out.println("<p class='info'>Aucun formulaire rattaché à ce projet.</p>");
-        } else {
+        List<ProjectSummary> children = listChildProjects(conn, project.id);
+        if (!children.isEmpty()) {
+            out.println("<h2 style='margin-top:24px;'>Sous-projets</h2>");
+            out.println("<div class='table-enhance'>");
+            out.println("<input type='text' class='table-search-input' placeholder='Rechercher un sous-projet...'>");
+            out.println("<table><thead><tr><th data-sortable>Nom</th><th data-sortable>Formulaires</th></tr></thead><tbody>");
+            for (ProjectSummary c : children) {
+                out.println("<tr><td><a href='project?projectId=" + c.id + "'>" + htmlEscape(c.name) + "</a></td>"
+                        + "<td>" + c.formCount + "</td></tr>");
+            }
+            out.println("</tbody></table>");
+            out.println("</div>");
+        }
+
+        // Ensemble agrégé (ce projet + tous ses sous-projets, récursivement) : utilisé pour les
+        // graphiques et le suivi des enquêteurs, qui doivent donner une vue d'ensemble complète.
+        Set<Integer> aggregateProjectIds = FormSchemaUtil.descendantProjectIds(conn, project.id);
+        boolean hasSubProjects = aggregateProjectIds.size() > 1;
+        List<String> aggregatedFormIds = new ArrayList<String>();
+        java.util.LinkedHashSet<String> aggregatedFormIdSet = new java.util.LinkedHashSet<String>();
+        for (Integer pid : aggregateProjectIds) {
+            aggregatedFormIdSet.addAll(listAttachedForms(conn, pid));
+        }
+        aggregatedFormIds.addAll(aggregatedFormIdSet);
+
+        if (!aggregatedFormIds.isEmpty()) {
             LinkedHashMap<String, Long> formCounts = new LinkedHashMap<String, Long>();
-            for (String formId : formIds) {
+            for (String formId : aggregatedFormIds) {
                 try {
                     formCounts.put(formId, FormSchemaUtil.submissionStats(conn, formId).count);
                 } catch (SQLException e) {
-                    // Formulaire introuvable (peut-être supprimé) - ignoré pour ce graphique,
-                    // le message d'erreur reste visible dans la table ci-dessous.
+                    // Formulaire introuvable (peut-être supprimé) - ignoré pour ce graphique.
                 }
             }
             boolean hasSubmissions = false;
@@ -620,10 +867,19 @@ public class ProjectServlet extends HttpServlet {
             }
             if (hasSubmissions) {
                 out.println("<div class='charts-grid'>");
-                ChartUtil.renderHorizontalBarChart(out, "Soumissions par formulaire", formCounts);
+                ChartUtil.renderHorizontalBarChart(out,
+                        hasSubProjects ? "Soumissions par formulaire (ce projet + sous-projets)" : "Soumissions par formulaire",
+                        formCounts);
                 out.println("</div>");
             }
+        }
 
+        // Formulaires rattachés directement a ce projet (gestion : ajout/retrait). Les graphiques
+        // ci-dessus et le suivi des enquêteurs, plus bas, agrègent en plus ceux des sous-projets.
+        List<String> formIds = listAttachedForms(conn, project.id);
+        if (formIds.isEmpty()) {
+            out.println("<p class='info'>Aucun formulaire rattaché directement à ce projet.</p>");
+        } else {
             out.println("<div class='table-enhance'>");
             out.println("<input type='text' class='table-search-input' placeholder='Rechercher un formulaire...'>");
             out.println("<table><thead><tr><th data-sortable>Formulaire</th><th data-sortable>Soumissions</th>"
@@ -641,9 +897,11 @@ public class ProjectServlet extends HttpServlet {
                 }
                 out.println("<td><div class='row-actions'>"
                         + "<a class='btn-link' href='formXml?formId=" + urlEncode(formId) + "'>" + ICON_DOWNLOAD + " XML</a>"
-                        + "<form class='inline' method='post' action='project?projectId=" + project.id + "&action=removeForm'>"
-                        + "<input type='hidden' name='formId' value='" + htmlEscape(formId) + "'>"
-                        + "<button type='submit' class='btn-link danger'>" + ICON_TRASH + " Retirer</button></form>"
+                        + (canManage
+                                ? "<form class='inline' method='post' action='project?projectId=" + project.id + "&action=removeForm'>"
+                                        + "<input type='hidden' name='formId' value='" + htmlEscape(formId) + "'>"
+                                        + "<button type='submit' class='btn-link danger'>" + ICON_TRASH + " Retirer</button></form>"
+                                : "")
                         + "</div></td>");
                 out.println("</tr>");
             }
@@ -651,31 +909,135 @@ public class ProjectServlet extends HttpServlet {
             out.println("</div>");
         }
 
-        out.println("<h2 style='margin-top:32px;'>Agents de collecte affectés</h2>");
-        out.println("<p class='info'>Un agent affecté à ce projet ne verra, sur son téléphone, que les formulaires "
-                + "listés ci-dessus. Un agent non affecté à aucun projet ne verra aucun formulaire.</p>");
+        out.println("<h2 style='margin-top:32px;'>Utilisateurs affectés</h2>");
+        out.println("<p class='info'>Un <strong>collecteur</strong> affecté à ce projet ne verra, sur son téléphone, que les "
+                + "formulaires listés ci-dessus. Un <strong>lecteur de données</strong> affecté à ce projet voit ce projet, "
+                + "sa lignée de projets parents (hérité) et tous ses sous-projets (agrégé). Un compte non affecté à aucun "
+                + "projet ne verra rien.</p>");
         List<String> collectors = listAssignedCollectors(conn, project.id);
+        Set<String> collectorRoleUsernames = FormSchemaUtil.listUsernamesWithAuthority(conn, "GROUP_DATA_COLLECTORS");
         if (collectors.isEmpty()) {
-            out.println("<p class='info'>Aucun agent affecté à ce projet.</p>");
+            out.println("<p class='info'>Aucun utilisateur affecté à ce projet.</p>");
         } else {
             out.println("<div class='table-enhance'>");
             out.println("<input type='text' class='table-search-input' placeholder='Rechercher un agent...'>");
-            out.println("<table><thead><tr><th data-sortable>Nom d'utilisateur</th><th></th></tr></thead><tbody>");
+            out.println("<table><thead><tr><th data-sortable>Nom d'utilisateur</th><th data-sortable>Rôle</th><th></th></tr></thead><tbody>");
             for (String username : collectors) {
                 out.println("<tr><td>" + htmlEscape(username) + "</td><td>"
-                        + "<form class='inline' method='post' action='project?projectId=" + project.id + "&action=removeCollector'>"
-                        + "<input type='hidden' name='username' value='" + htmlEscape(username) + "'>"
-                        + "<button type='submit' class='btn-link danger'>" + ICON_TRASH + " Retirer</button></form></td></tr>");
+                        + (collectorRoleUsernames.contains(username) ? "Collecteur de données" : "Lecteur de données")
+                        + "</td><td>"
+                        + (canManage
+                                ? "<form class='inline' method='post' action='project?projectId=" + project.id + "&action=removeCollector'>"
+                                        + "<input type='hidden' name='username' value='" + htmlEscape(username) + "'>"
+                                        + "<button type='submit' class='btn-link danger'>" + ICON_TRASH + " Retirer</button></form>"
+                                : "")
+                        + "</td></tr>");
             }
             out.println("</tbody></table>");
             out.println("</div>");
         }
+
+        // Suivi des enquêteurs agrégé : formulaires ET utilisateurs affectés de ce projet + tous ses sous-projets.
+        java.util.LinkedHashSet<String> aggregatedUsers = new java.util.LinkedHashSet<String>();
+        for (Integer pid : aggregateProjectIds) {
+            aggregatedUsers.addAll(listAssignedCollectors(conn, pid));
+        }
+        renderEnqueteurTracking(conn, out, aggregatedFormIds, new ArrayList<String>(aggregatedUsers), collectorRoleUsernames);
         writeFooter(out);
+    }
+
+    /**
+     * Suivi des enquêteurs par projet : pour chaque agent de collecte affecté (parmi les
+     * utilisateurs affectés, en excluant les lecteurs de données), compte ses soumissions sur tous
+     * les formulaires du projet. Identifié par le compte de connexion ODK Collect (_CREATOR_URI_USER,
+     * au format "uid:&lt;username&gt;|&lt;horodatage&gt;" - stable par compte, voir
+     * FormSchemaUtil.extractLocalUsername), pas par un champ de formulaire.
+     */
+    private void renderEnqueteurTracking(Connection conn, PrintWriter out, List<String> formIds,
+            List<String> assignedUsers, Set<String> collectorRoleUsernames) throws SQLException {
+        out.println("<h2 style='margin-top:32px;'>Suivi des enquêteurs</h2>");
+        out.println("<p class='info'>Nombre de soumissions envoyées par chaque agent de collecte affecté à ce projet, "
+                + "tous formulaires du projet confondus (identifié via son compte de connexion ODK Collect).</p>");
+
+        List<String> enqueteurs = new ArrayList<String>();
+        for (String u : assignedUsers) {
+            if (collectorRoleUsernames.contains(u)) {
+                enqueteurs.add(u);
+            }
+        }
+        if (enqueteurs.isEmpty()) {
+            out.println("<p class='info'>Aucun agent de collecte affecté à ce projet.</p>");
+            return;
+        }
+        if (formIds.isEmpty()) {
+            out.println("<p class='info'>Aucun formulaire rattaché à ce projet.</p>");
+            return;
+        }
+
+        LinkedHashMap<String, Long> countByEnqueteur = new LinkedHashMap<String, Long>();
+        java.util.Map<String, Timestamp> lastByEnqueteur = new java.util.HashMap<String, Timestamp>();
+        for (String u : enqueteurs) {
+            countByEnqueteur.put(u, 0L);
+        }
+        for (String formId : formIds) {
+            String coreTable;
+            try {
+                coreTable = FormSchemaUtil.resolveCoreTableOrThrow(conn, formId);
+            } catch (SQLException e) {
+                continue;
+            }
+            for (String u : enqueteurs) {
+                String pattern = "uid:" + u + "|%";
+                try (PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*), MAX(\"_SUBMISSION_DATE\") "
+                        + "FROM odk_prod.\"" + coreTable + "\" WHERE \"_CREATOR_URI_USER\" LIKE ?")) {
+                    ps.setString(1, pattern);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            countByEnqueteur.put(u, countByEnqueteur.get(u) + rs.getLong(1));
+                            Timestamp last = rs.getTimestamp(2);
+                            if (last != null) {
+                                Timestamp prev = lastByEnqueteur.get(u);
+                                if (prev == null || last.after(prev)) {
+                                    lastByEnqueteur.put(u, last);
+                                }
+                            }
+                        }
+                    }
+                } catch (SQLException e) {
+                    // Table introuvable (formulaire peut-être supprimé) - ignorée pour ce comptage.
+                }
+            }
+        }
+
+        boolean anySubmissions = false;
+        for (Long v : countByEnqueteur.values()) {
+            if (v != null && v > 0) {
+                anySubmissions = true;
+                break;
+            }
+        }
+        if (anySubmissions) {
+            out.println("<div class='charts-grid'>");
+            ChartUtil.renderHorizontalBarChart(out, "Soumissions par enquêteur", countByEnqueteur);
+            out.println("</div>");
+        }
+
+        out.println("<div class='table-enhance'>");
+        out.println("<input type='text' class='table-search-input' placeholder='Rechercher un enquêteur...'>");
+        out.println("<table><thead><tr><th data-sortable>Enquêteur</th><th data-sortable>Soumissions</th>"
+                + "<th data-sortable>Dernière soumission</th></tr></thead><tbody>");
+        for (String u : enqueteurs) {
+            Timestamp last = lastByEnqueteur.get(u);
+            out.println("<tr><td>" + htmlEscape(u) + "</td><td>" + countByEnqueteur.get(u) + "</td><td>"
+                    + htmlEscape(last == null ? "" : last.toString()) + "</td></tr>");
+        }
+        out.println("</tbody></table>");
+        out.println("</div>");
     }
 
     private void renderAddCollectorPicker(Connection conn, PrintWriter out, Project project, CallingContext cc)
             throws SQLException {
-        writeHeader(out, "Affecter un agent — " + project.name);
+        writeHeader(out, "Affecter un utilisateur — " + project.name);
         out.println("<p class='back-link'><a href='project?projectId=" + project.id + "'>&laquo; Retour au projet</a></p>");
         List<String> addable;
         try {
@@ -686,8 +1048,8 @@ public class ProjectServlet extends HttpServlet {
             return;
         }
         if (addable.isEmpty()) {
-            out.println("<p class='info'>Aucun agent de collecte disponible à affecter "
-                    + "(tous déjà affectés, ou aucun compte avec le rôle Collecteur de données).</p>");
+            out.println("<p class='info'>Aucun utilisateur disponible à affecter "
+                    + "(tous déjà affectés, ou aucun compte avec le rôle Collecteur de données ou Lecteur de données).</p>");
         } else {
             out.println("<ul class='list'>");
             for (String username : addable) {

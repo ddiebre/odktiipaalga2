@@ -42,11 +42,13 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.xml.sax.InputSource;
 
+import odk.common.ActivityLog;
 import odk.common.FormDeletionUtil;
 import odk.common.FormSchemaUtil;
 import odk.common.FormUploadUtil;
 import odk.common.NavBar;
 import odk.common.XlsFormConverter;
+import odk.common.XlsxWriter;
 
 /**
  * Admin-only tool (see /editSubmission intercept-url, ROLE_DATA_OWNER) to edit
@@ -93,6 +95,29 @@ public class EditSubmissionServlet extends HttpServlet {
         return (DataSource) ctx.getBean("dataSource");
     }
 
+    /**
+     * ROLE_DATA_VIEWER (Lecteur de données) peut désormais accéder à /editSubmission (voir
+     * l'intercept-url) pour consulter/télécharger, mais toute création/modification/suppression
+     * reste réservée à ROLE_DATA_OWNER (Gestionnaire de formulaires) - vérifié explicitement ici à
+     * chaque action d'écriture, en plus de masquer les boutons correspondants côté affichage.
+     */
+    private boolean isDataOwner() {
+        return FormSchemaUtil.currentUserHasRole("ROLE_DATA_OWNER", getServletContext());
+    }
+
+    private void renderAccessDenied(PrintWriter out, String backHref, String backLabel) {
+        writeHeader(out, "Accès refusé");
+        out.println("<p class='err'>Votre rôle (Lecteur de données) permet de consulter et télécharger, "
+                + "mais pas de créer, modifier ou supprimer.</p>");
+        out.println("<p class='back-link'><a href='" + backHref + "'>&laquo; " + htmlEscape(backLabel) + "</a></p>");
+        writeFooter(out);
+    }
+
+    private void denyPost(HttpServletResponse resp) throws IOException {
+        resp.sendError(HttpServletResponse.SC_FORBIDDEN,
+                "Action non autorisée pour votre rôle (Lecteur de données : consultation/téléchargement uniquement).");
+    }
+
     private static void checkIdentifier(String identifier) throws SQLException {
         FormSchemaUtil.checkIdentifier(identifier);
     }
@@ -105,6 +130,17 @@ public class EditSubmissionServlet extends HttpServlet {
         return FormSchemaUtil.resolveCoreTable(conn, submissionDataModelUri);
     }
 
+    /**
+     * META_INSTANCE_ID (le champ meta &lt;instanceID&gt; qu'ODK ajoute automatiquement à chaque
+     * formulaire) est un vrai élément de _form_data_model (ELEMENT_TYPE=STRING), donc listé ici
+     * comme n'importe quelle autre colonne - mais insertSubmissionRow le gère déjà explicitement
+     * en dur (toujours = _URI de la nouvelle soumission) : sans cette exclusion il apparaît deux
+     * fois dans l'INSERT généré et Postgres rejette la requête ("column ... specified more than
+     * once"). Une table core partagée par plusieurs versions d'un même formulaire peut aussi, en
+     * théorie, avoir plusieurs lignes pointant vers la même colonne physique - dédupliquer par nom
+     * de colonne (la première rencontrée, dans l'ordre ORDINAL_NUMBER, est conservée) reste donc
+     * une sécurité supplémentaire.
+     */
     private static List<ColumnMeta> listEditableColumns(Connection conn, String coreTable) throws SQLException {
         checkIdentifier(coreTable);
         String sql = "SELECT dm.\"ELEMENT_NAME\", dm.\"PERSIST_AS_COLUMN_NAME\", c.data_type "
@@ -114,20 +150,23 @@ public class EditSubmissionServlet extends HttpServlet {
                 + "  AND c.column_name = dm.\"PERSIST_AS_COLUMN_NAME\" "
                 + "WHERE dm.\"PERSIST_AS_TABLE_NAME\" = ? "
                 + "  AND dm.\"PERSIST_AS_COLUMN_NAME\" IS NOT NULL "
+                + "  AND dm.\"PERSIST_AS_COLUMN_NAME\" <> 'META_INSTANCE_ID' "
                 + "  AND dm.\"ELEMENT_TYPE\" NOT IN ('GROUP','REPEAT','BINARY') "
                 + "ORDER BY dm.\"ORDINAL_NUMBER\"";
-        List<ColumnMeta> columns = new ArrayList<ColumnMeta>();
+        Map<String, ColumnMeta> byColumnName = new java.util.LinkedHashMap<String, ColumnMeta>();
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, coreTable);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     String columnName = rs.getString(2);
                     checkIdentifier(columnName);
-                    columns.add(new ColumnMeta(rs.getString(1), columnName, rs.getString(3)));
+                    if (!byColumnName.containsKey(columnName)) {
+                        byColumnName.put(columnName, new ColumnMeta(rs.getString(1), columnName, rs.getString(3)));
+                    }
                 }
             }
         }
-        return columns;
+        return new ArrayList<ColumnMeta>(byColumnName.values());
     }
 
     private static String resolveCoreTableOrThrow(Connection conn, String formId) throws SQLException {
@@ -248,6 +287,8 @@ public class EditSubmissionServlet extends HttpServlet {
     private static final String ICON_PLUS = "<svg viewBox='0 0 24 24'><path d='M12 5v14M5 12h14'/></svg>";
     private static final String ICON_EDIT =
             "<svg viewBox='0 0 24 24'><path d='M4 20h4L18.5 9.5a2.121 2.121 0 0 0-3-3L5 17v3z'/><path d='M13.5 6.5l4 4'/></svg>";
+    private static final String ICON_VIEW =
+            "<svg viewBox='0 0 24 24'><path d='M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z'/><circle cx='12' cy='12' r='3'/></svg>";
     private static final String ICON_TRASH =
             "<svg viewBox='0 0 24 24'><path d='M4 7h16'/><path d='M9 7V4h6v3'/>"
             + "<path d='M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13'/><path d='M10 11v6M14 11v6'/></svg>";
@@ -255,8 +296,13 @@ public class EditSubmissionServlet extends HttpServlet {
             "<svg viewBox='0 0 24 24'><path d='M12 16V4'/><path d='M7 9l5-5 5 5'/><path d='M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3'/></svg>";
     private static final String ICON_DOWNLOAD =
             "<svg viewBox='0 0 24 24'><path d='M12 4v12'/><path d='M7 11l5 5 5-5'/><path d='M4 20h16'/></svg>";
+    private static final String ICON_CARET =
+            "<svg class='dropdown-caret' viewBox='0 0 24 24'><path d='M6 9l6 6 6-6'/></svg>";
     private static final String ICON_MAP =
             "<svg viewBox='0 0 24 24'><path d='M12 21s7-6.5 7-11a7 7 0 1 0-14 0c0 4.5 7 11 7 11z'/><circle cx='12' cy='10' r='2.4'/></svg>";
+    private static final String ICON_DUPLICATE =
+            "<svg viewBox='0 0 24 24'><rect x='9' y='9' width='11' height='11' rx='1.5'/>"
+            + "<path d='M5 15V5a1 1 0 0 1 1-1h10'/></svg>";
 
     private void writeHeader(PrintWriter out, String title) {
         writeHeader(out, title, "soumissions");
@@ -284,8 +330,27 @@ public class EditSubmissionServlet extends HttpServlet {
         String uri = req.getParameter("uri");
         String action = req.getParameter("action");
         try (Connection conn = getDataSource().getConnection()) {
+            boolean canManage = isDataOwner();
+            if (formId != null && !canManage
+                    && !FormSchemaUtil.isFormAccessibleToViewer(conn, formId, FormSchemaUtil.currentLocalUsername())) {
+                resp.sendError(HttpServletResponse.SC_FORBIDDEN,
+                        "Ce formulaire n'appartient à aucun projet auquel vous êtes affecté.");
+                return;
+            }
             if (formId != null && "exportAll".equals(action)) {
                 streamCsvExport(conn, resp, formId, null);
+                return;
+            }
+            if (formId != null && "exportAllJson".equals(action)) {
+                streamJsonExport(conn, resp, formId, null);
+                return;
+            }
+            if (formId != null && "exportAllXlsx".equals(action)) {
+                streamXlsxExport(conn, resp, formId, null);
+                return;
+            }
+            if (formId != null && "exportAllKml".equals(action)) {
+                streamKmlExport(conn, resp, formId);
                 return;
             }
             if (formId != null && "csvTemplate".equals(action)) {
@@ -295,25 +360,59 @@ public class EditSubmissionServlet extends HttpServlet {
             resp.setContentType("text/html;charset=UTF-8");
             PrintWriter out = resp.getWriter();
             if (formId == null && "importForm".equals(action)) {
+                if (!canManage) {
+                    renderAccessDenied(out, "editSubmission", "Formulaires");
+                    return;
+                }
                 renderImportFormPage(out, null);
             } else if (formId == null && "importXlsForm".equals(action)) {
+                if (!canManage) {
+                    renderAccessDenied(out, "editSubmission", "Formulaires");
+                    return;
+                }
                 renderImportXlsFormPage(out, null);
             } else if (formId == null && "submissions".equals(action)) {
                 renderSubmissionsHome(conn, out);
             } else if (formId == null) {
                 String deletedForm = req.getParameter("deletedForm");
-                renderFormList(conn, out, "1".equals(deletedForm) ? "Formulaire supprimé." : null);
+                renderFormList(conn, out, "1".equals(deletedForm) ? "Formulaire supprimé." : null, canManage);
             } else if ("new".equals(action)) {
+                if (!canManage) {
+                    renderAccessDenied(out, "editSubmission?formId=" + urlEncode(formId), formId);
+                    return;
+                }
                 renderCreateForm(conn, out, formId, null);
             } else if ("csv".equals(action)) {
+                if (!canManage) {
+                    renderAccessDenied(out, "editSubmission?formId=" + urlEncode(formId), formId);
+                    return;
+                }
                 renderCsvUploadForm(conn, out, formId, null);
             } else if ("csvUpdate".equals(action)) {
+                if (!canManage) {
+                    renderAccessDenied(out, "editSubmission?formId=" + urlEncode(formId), formId);
+                    return;
+                }
                 renderCsvUpdateForm(conn, out, formId, null);
             } else if ("map".equals(action)) {
                 renderMap(conn, out, formId);
             } else if ("delete".equals(action) && uri != null) {
+                if (!canManage) {
+                    renderAccessDenied(out, "editSubmission?formId=" + urlEncode(formId), formId);
+                    return;
+                }
                 renderDeleteConfirm(conn, out, formId, uri, null);
+            } else if ("duplicate".equals(action) && uri != null) {
+                if (!canManage) {
+                    renderAccessDenied(out, "editSubmission?formId=" + urlEncode(formId), formId);
+                    return;
+                }
+                renderDuplicateConfirm(conn, out, formId, uri, null);
             } else if ("deleteForm".equals(action)) {
+                if (!canManage) {
+                    renderAccessDenied(out, "editSubmission?formId=" + urlEncode(formId), formId);
+                    return;
+                }
                 renderDeleteFormConfirm(conn, out, formId, null);
             } else if (uri == null) {
                 int offset = 0;
@@ -325,9 +424,10 @@ public class EditSubmissionServlet extends HttpServlet {
                 String notice = deleted == null ? null
                         : "1".equals(deleted) ? "Soumission supprimée."
                         : deleted + " soumission(s) supprimée(s).";
-                renderSubmissionList(conn, out, formId, offset, notice);
+                renderSubmissionList(conn, out, formId, offset, notice, canManage);
             } else {
-                renderEditForm(conn, out, formId, uri, null, "1".equals(req.getParameter("created")));
+                renderEditForm(conn, out, formId, uri, null, "1".equals(req.getParameter("created")),
+                        "1".equals(req.getParameter("duplicated")), !canManage);
             }
         } catch (SQLException e) {
             throw new ServletException(e);
@@ -340,6 +440,23 @@ public class EditSubmissionServlet extends HttpServlet {
         String uri = req.getParameter("uri");
         String action = req.getParameter("action");
         try (Connection conn = getDataSource().getConnection()) {
+            // Toutes les actions ci-dessous ecrivent en base (creation/modification/suppression),
+            // y compris action=null (enregistrement d'une soumission modifiee, cf. renderEditForm) -
+            // reservees a ROLE_DATA_OWNER ; seuls les exports de la selection (telechargement) restent hors garde.
+            boolean isWriteAction = !"exportSelected".equals(action) && !"exportSelectedJson".equals(action)
+                    && !"exportSelectedXlsx".equals(action);
+            boolean canManage = isDataOwner();
+            if (isWriteAction && !canManage) {
+                denyPost(resp);
+                return;
+            }
+            // "exportSelected" est le seul chemin POST accessible a un lecteur de donnees - meme
+            // restriction par projet affecte que cote GET.
+            if (formId != null && !canManage
+                    && !FormSchemaUtil.isFormAccessibleToViewer(conn, formId, FormSchemaUtil.currentLocalUsername())) {
+                denyPost(resp);
+                return;
+            }
             if ("importForm".equals(action)) {
                 handleImportForm(conn, req, resp);
                 return;
@@ -362,6 +479,14 @@ public class EditSubmissionServlet extends HttpServlet {
             }
             if ("exportSelected".equals(action)) {
                 streamCsvExport(conn, resp, formId, req.getParameterValues("uri"));
+                return;
+            }
+            if ("exportSelectedJson".equals(action)) {
+                streamJsonExport(conn, resp, formId, req.getParameterValues("uri"));
+                return;
+            }
+            if ("exportSelectedXlsx".equals(action)) {
+                streamXlsxExport(conn, resp, formId, req.getParameterValues("uri"));
                 return;
             }
             if ("csvUpload".equals(action)) {
@@ -393,6 +518,7 @@ public class EditSubmissionServlet extends HttpServlet {
                     error = e.getMessage();
                 }
                 if (error == null) {
+                    ActivityLog.record(conn, "submission.create", "soumission", newUri, "Formulaire : " + formId);
                     resp.sendRedirect("editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(newUri) + "&created=1");
                     return;
                 }
@@ -408,11 +534,30 @@ public class EditSubmissionServlet extends HttpServlet {
                     error = e.getMessage();
                 }
                 if (error == null) {
+                    ActivityLog.record(conn, "submission.delete", "soumission", uri, "Formulaire : " + formId);
                     resp.sendRedirect("editSubmission?formId=" + urlEncode(formId) + "&deleted=1");
                     return;
                 }
                 resp.setContentType("text/html;charset=UTF-8");
                 renderDeleteConfirm(conn, resp.getWriter(), formId, uri, error);
+                return;
+            }
+            if ("duplicateConfirm".equals(action)) {
+                String error = null;
+                String newUri = null;
+                try {
+                    newUri = duplicateSubmission(conn, formId, uri);
+                } catch (Exception e) {
+                    error = e.getMessage();
+                }
+                if (error == null) {
+                    ActivityLog.record(conn, "submission.duplicate", "soumission", newUri,
+                            "Copie de " + uri + " (formulaire : " + formId + ")");
+                    resp.sendRedirect("editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(newUri) + "&duplicated=1");
+                    return;
+                }
+                resp.setContentType("text/html;charset=UTF-8");
+                renderDuplicateConfirm(conn, resp.getWriter(), formId, uri, error);
                 return;
             }
             if ("deleteSelectedConfirm".equals(action)) {
@@ -430,6 +575,7 @@ public class EditSubmissionServlet extends HttpServlet {
                     error = e.getMessage();
                 }
                 if (error == null) {
+                    ActivityLog.record(conn, "submission.delete_bulk", "formulaire", formId, count + " soumission(s) supprimée(s)");
                     resp.sendRedirect("editSubmission?formId=" + urlEncode(formId) + "&deleted=" + count);
                     return;
                 }
@@ -442,6 +588,7 @@ public class EditSubmissionServlet extends HttpServlet {
             String error = null;
             try {
                 saveSubmission(conn, req, formId, uri);
+                ActivityLog.record(conn, "submission.update", "soumission", uri, "Formulaire : " + formId);
             } catch (Exception e) {
                 error = e.getMessage();
             }
@@ -451,18 +598,21 @@ public class EditSubmissionServlet extends HttpServlet {
         }
     }
 
-    private void renderFormList(Connection conn, PrintWriter out, String notice) throws SQLException {
+    private void renderFormList(Connection conn, PrintWriter out, String notice, boolean canManage) throws SQLException {
         writeHeader(out, "Choisir un formulaire", "formulaires");
         if (notice != null) {
             out.println("<p class='success'>" + htmlEscape(notice) + "</p>");
         }
-        out.println("<p class='info'>Sélectionnez le formulaire dont vous voulez modifier une soumission.</p>");
-        out.println("<div class='toolbar'>");
-        out.println("<a class='btn-link' href='editSubmission?action=importForm'>" + ICON_UPLOAD
-                + " Importer un formulaire XML</a>");
-        out.println("<a class='btn-link' href='editSubmission?action=importXlsForm'>" + ICON_UPLOAD
-                + " Importer un XLSForm (Excel)</a>");
-        out.println("</div>");
+        out.println("<p class='info'>Sélectionnez un formulaire pour "
+                + (canManage ? "consulter ou modifier ses soumissions." : "consulter ou télécharger ses soumissions.") + "</p>");
+        if (canManage) {
+            out.println("<div class='toolbar'>");
+            out.println("<a class='btn-link' href='editSubmission?action=importForm'>" + ICON_UPLOAD
+                    + " Importer un formulaire XML</a>");
+            out.println("<a class='btn-link' href='editSubmission?action=importXlsForm'>" + ICON_UPLOAD
+                    + " Importer un XLSForm (Excel)</a>");
+            out.println("</div>");
+        }
         String sql = "SELECT \"SUBMISSION_FORM_ID\" FROM odk_prod.\"_form_info_submission_association\" "
                 + "WHERE \"IS_SUBMISSION_ALLOWED\" = true AND \"URI_SUBMISSION_DATA_MODEL\" IS NOT NULL "
                 + "ORDER BY \"SUBMISSION_FORM_ID\"";
@@ -472,8 +622,13 @@ public class EditSubmissionServlet extends HttpServlet {
                 formIds.add(rs.getString(1));
             }
         }
+        if (!canManage) {
+            Set<String> visible = FormSchemaUtil.listFormsVisibleToViewer(conn, FormSchemaUtil.currentLocalUsername());
+            formIds.retainAll(visible);
+        }
         if (formIds.isEmpty()) {
-            out.println("<p class='info'>Aucun formulaire pour le moment.</p>");
+            out.println("<p class='info'>" + (canManage ? "Aucun formulaire pour le moment."
+                    : "Aucun formulaire visible : vous n'êtes affecté à aucun projet.") + "</p>");
         } else {
             out.println("<div class='table-enhance'>");
             out.println("<input type='text' class='table-search-input' placeholder='Rechercher un formulaire...'>");
@@ -483,8 +638,10 @@ public class EditSubmissionServlet extends HttpServlet {
                         + htmlEscape(formId) + "</a></td><td><div class='row-actions'>"
                         + "<a class='btn-link' href='formXml?formId=" + urlEncode(formId) + "'>" + ICON_DOWNLOAD
                         + " Télécharger</a>"
-                        + "<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId)
-                        + "&action=deleteForm'>" + ICON_TRASH + " Supprimer</a>"
+                        + (canManage
+                                ? "<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId)
+                                        + "&action=deleteForm'>" + ICON_TRASH + " Supprimer</a>"
+                                : "")
                         + "</div></td></tr>");
             }
             out.println("</tbody></table>");
@@ -496,7 +653,9 @@ public class EditSubmissionServlet extends HttpServlet {
     /** Ecran d'accueil de la section "Soumissions" : formulaires avec leur nombre de soumissions. */
     private void renderSubmissionsHome(Connection conn, PrintWriter out) throws SQLException {
         writeHeader(out, "Soumissions", "soumissions");
-        out.println("<p class='info'>Choisissez un formulaire pour consulter, modifier ou exporter ses soumissions.</p>");
+        boolean canManage = isDataOwner();
+        out.println("<p class='info'>Choisissez un formulaire pour consulter"
+                + (canManage ? ", modifier ou exporter ses soumissions." : " ou exporter ses soumissions.") + "</p>");
         String sql = "SELECT \"SUBMISSION_FORM_ID\" FROM odk_prod.\"_form_info_submission_association\" "
                 + "WHERE \"IS_SUBMISSION_ALLOWED\" = true AND \"URI_SUBMISSION_DATA_MODEL\" IS NOT NULL "
                 + "ORDER BY \"SUBMISSION_FORM_ID\"";
@@ -506,8 +665,13 @@ public class EditSubmissionServlet extends HttpServlet {
                 formIds.add(rs.getString(1));
             }
         }
+        if (!canManage) {
+            Set<String> visible = FormSchemaUtil.listFormsVisibleToViewer(conn, FormSchemaUtil.currentLocalUsername());
+            formIds.retainAll(visible);
+        }
         if (formIds.isEmpty()) {
-            out.println("<p class='info'>Aucun formulaire pour le moment.</p>");
+            out.println("<p class='info'>" + (canManage ? "Aucun formulaire pour le moment."
+                    : "Aucun formulaire visible : vous n'êtes affecté à aucun projet.") + "</p>");
         } else {
             out.println("<div class='table-enhance'>");
             out.println("<input type='text' class='table-search-input' placeholder='Rechercher un formulaire...'>");
@@ -611,7 +775,9 @@ public class EditSubmissionServlet extends HttpServlet {
                 Set<String> after = FormSchemaUtil.listAllFormIds(conn);
                 after.removeAll(before);
                 if (after.size() == 1) {
-                    resp.sendRedirect("editSubmission?formId=" + urlEncode(after.iterator().next()) + "&created=1");
+                    String newFormId = after.iterator().next();
+                    ActivityLog.record(conn, "form.import", "formulaire", newFormId, "Import XML direct");
+                    resp.sendRedirect("editSubmission?formId=" + urlEncode(newFormId) + "&created=1");
                 } else {
                     resp.sendRedirect("editSubmission");
                 }
@@ -918,7 +1084,9 @@ public class EditSubmissionServlet extends HttpServlet {
                 Set<String> after = FormSchemaUtil.listAllFormIds(conn);
                 after.removeAll(before);
                 if (after.size() == 1) {
-                    resp.sendRedirect("editSubmission?formId=" + urlEncode(after.iterator().next()) + "&created=1");
+                    String newFormId = after.iterator().next();
+                    ActivityLog.record(conn, "form.import", "formulaire", newFormId, "Import via XLSForm (Excel)");
+                    resp.sendRedirect("editSubmission?formId=" + urlEncode(newFormId) + "&created=1");
                 } else {
                     resp.sendRedirect("editSubmission");
                 }
@@ -938,8 +1106,8 @@ public class EditSubmissionServlet extends HttpServlet {
         renderXlsFormResult(resp.getWriter(), xmlBytes, formTitle, message);
     }
 
-    private void renderSubmissionList(Connection conn, PrintWriter out, String formId, int offset, String notice)
-            throws SQLException {
+    private void renderSubmissionList(Connection conn, PrintWriter out, String formId, int offset, String notice,
+            boolean canManage) throws SQLException {
         writeHeader(out, "Soumissions — " + formId);
         out.println("<p class='back-link'><a href='editSubmission'>&laquo; Formulaires</a></p>");
         if (notice != null) {
@@ -954,24 +1122,45 @@ public class EditSubmissionServlet extends HttpServlet {
             return;
         }
 
+        List<ColumnMeta> columns = listEditableColumns(conn, coreTable);
+        boolean hasGeoField = !findGeoFields(columns).isEmpty();
+
         out.println("<div class='toolbar'>");
-        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=new'>" + ICON_PLUS
-                + " Nouvelle soumission</a>");
-        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=csv'>" + ICON_UPLOAD
-                + " Importer CSV</a>");
-        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=csvUpdate'>" + ICON_UPLOAD
-                + " Mettre à jour via CSV</a>");
+        if (canManage) {
+            out.println("<div class='dropdown'>");
+            out.println("<button type='button' class='btn-link dropdown-trigger'>" + ICON_PLUS + " Ajouter soumission" + ICON_CARET
+                    + "</button>");
+            out.println("<div class='dropdown-menu'>");
+            out.println("<a href='editSubmission?formId=" + urlEncode(formId) + "&action=new'>" + ICON_PLUS
+                    + " Nouvelle soumission</a>");
+            out.println("<a href='editSubmission?formId=" + urlEncode(formId) + "&action=csv'>" + ICON_UPLOAD
+                    + " Importer CSV</a>");
+            out.println("<a href='editSubmission?formId=" + urlEncode(formId) + "&action=csvUpdate'>" + ICON_UPLOAD
+                    + " Mettre à jour via CSV</a>");
+            out.println("</div>");
+            out.println("</div>");
+        }
         out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=map'>" + ICON_MAP
                 + " Carte</a>");
-        out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&action=exportAll'>" + ICON_DOWNLOAD
-                + " Télécharger tout (CSV)</a>");
+        out.println("<div class='dropdown'>");
+        out.println("<button type='button' class='btn-link dropdown-trigger'>" + ICON_DOWNLOAD + " Télécharger tout" + ICON_CARET
+                + "</button>");
+        out.println("<div class='dropdown-menu'>");
+        out.println("<a href='editSubmission?formId=" + urlEncode(formId) + "&action=exportAll'>" + ICON_DOWNLOAD + " CSV</a>");
+        out.println("<a href='editSubmission?formId=" + urlEncode(formId) + "&action=exportAllJson'>" + ICON_DOWNLOAD + " JSON</a>");
+        out.println("<a href='editSubmission?formId=" + urlEncode(formId) + "&action=exportAllXlsx'>" + ICON_DOWNLOAD + " Excel</a>");
+        if (hasGeoField) {
+            out.println("<a href='editSubmission?formId=" + urlEncode(formId) + "&action=exportAllKml'>" + ICON_DOWNLOAD + " KML</a>");
+        }
+        out.println("</div>");
+        out.println("</div>");
         out.println("<a class='btn-link' href='formXml?formId=" + urlEncode(formId) + "'>" + ICON_DOWNLOAD
                 + " Télécharger le formulaire (XML)</a>");
-        out.println("<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&action=deleteForm'>"
-                + ICON_TRASH + " Supprimer ce formulaire</a>");
+        if (canManage) {
+            out.println("<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&action=deleteForm'>"
+                    + ICON_TRASH + " Supprimer ce formulaire</a>");
+        }
         out.println("</div>");
-
-        List<ColumnMeta> columns = listEditableColumns(conn, coreTable);
 
         out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=exportSelected'>");
         out.println("<div class='table-enhance'>");
@@ -1009,9 +1198,12 @@ public class EditSubmissionServlet extends HttpServlet {
                     }
                     out.println("<td>"
                             + "<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(rowUri)
-                            + "'>" + ICON_EDIT + " Modifier</a> "
-                            + "<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(rowUri)
-                            + "&action=delete'>" + ICON_TRASH + " Supprimer</a></td></tr>");
+                            + "'>" + (canManage ? ICON_EDIT + " Modifier" : ICON_VIEW + " Voir") + "</a> "
+                            + (canManage
+                                    ? "<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&uri="
+                                            + urlEncode(rowUri) + "&action=delete'>" + ICON_TRASH + " Supprimer</a>"
+                                    : "")
+                            + "</td></tr>");
                 }
             }
         }
@@ -1020,10 +1212,22 @@ public class EditSubmissionServlet extends HttpServlet {
         out.println("</div>");
         if (rowCount > 0) {
             out.println("<div class='actions'>"
+                    + "<div class='dropdown'>"
+                    + "<button type='button' class='dropdown-trigger'>" + ICON_DOWNLOAD + " Télécharger la sélection" + ICON_CARET
+                    + "</button>"
+                    + "<div class='dropdown-menu'>"
                     + "<button type='submit' formaction='editSubmission?formId=" + urlEncode(formId)
-                    + "&action=exportSelected'>" + ICON_DOWNLOAD + " Télécharger la sélection (CSV)</button> "
-                    + "<button type='submit' class='danger' formaction='editSubmission?formId=" + urlEncode(formId)
-                    + "&action=deleteSelectedConfirm'>" + ICON_TRASH + " Supprimer la sélection</button>"
+                    + "&action=exportSelected'>" + ICON_DOWNLOAD + " CSV</button>"
+                    + "<button type='submit' formaction='editSubmission?formId=" + urlEncode(formId)
+                    + "&action=exportSelectedJson'>" + ICON_DOWNLOAD + " JSON</button>"
+                    + "<button type='submit' formaction='editSubmission?formId=" + urlEncode(formId)
+                    + "&action=exportSelectedXlsx'>" + ICON_DOWNLOAD + " Excel</button>"
+                    + "</div>"
+                    + "</div> "
+                    + (canManage
+                            ? "<button type='submit' class='danger' formaction='editSubmission?formId=" + urlEncode(formId)
+                                    + "&action=deleteSelectedConfirm'>" + ICON_TRASH + " Supprimer la sélection</button>"
+                            : "")
                     + "</div>");
         }
         out.println("</form>");
@@ -1043,7 +1247,26 @@ public class EditSubmissionServlet extends HttpServlet {
 
     private void renderEditForm(Connection conn, PrintWriter out, String formId, String uri, String error, boolean created)
             throws SQLException {
-        writeHeader(out, "Modifier la soumission");
+        renderEditForm(conn, out, formId, uri, error, created, false, !isDataOwner());
+    }
+
+    /**
+     * readOnly (rôle Lecteur de données uniquement, pas Gestionnaire de formulaires) : mêmes
+     * données affichées, mais champs désactivés, pas de bouton Enregistrer, pas de lien Supprimer -
+     * "il doit juste pouvoir télécharger ou visualiser".
+     */
+    private void renderEditForm(Connection conn, PrintWriter out, String formId, String uri, String error,
+            boolean created, boolean readOnly) throws SQLException {
+        renderEditForm(conn, out, formId, uri, error, created, false, readOnly);
+    }
+
+    /**
+     * duplicated : la soumission affichée vient d'être créée par "Dupliquer" (cf. duplicateSubmission) -
+     * message de confirmation distinct, invitant à corriger/renommer la copie avant de sauvegarder.
+     */
+    private void renderEditForm(Connection conn, PrintWriter out, String formId, String uri, String error,
+            boolean created, boolean duplicated, boolean readOnly) throws SQLException {
+        writeHeader(out, readOnly ? "Consulter la soumission" : "Modifier la soumission");
         out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
                 + "'>&laquo; Liste des soumissions</a></p>");
 
@@ -1076,39 +1299,123 @@ public class EditSubmissionServlet extends HttpServlet {
 
         if (error != null) {
             out.println("<p class='err'>Erreur : " + htmlEscape(error) + "</p>");
+        } else if (duplicated) {
+            out.println("<p class='success'>Soumission dupliquée. Corrigez ou renommez les champs ci-dessous "
+                    + "puis enregistrez pour nettoyer cette copie.</p>");
         } else if (created) {
             out.println("<p class='success'>Soumission créée avec succès.</p>");
         }
         out.println("<p class='info'>_URI : " + htmlEscape(uri) + "</p>");
-        out.println("<div class='toolbar'>");
-        out.println("<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(uri)
-                + "&action=delete'>" + ICON_TRASH + " Supprimer cette soumission</a>");
-        out.println("</div>");
+        if (readOnly) {
+            out.println("<p class='info'>Lecture seule : votre rôle permet de consulter et télécharger, "
+                    + "mais pas de modifier ou supprimer.</p>");
+        } else {
+            out.println("<div class='toolbar'>");
+            out.println("<a class='btn-link' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(uri)
+                    + "&action=duplicate'>" + ICON_DUPLICATE + " Dupliquer</a>");
+            out.println("<a class='btn-link danger' href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(uri)
+                    + "&action=delete'>" + ICON_TRASH + " Supprimer cette soumission</a>");
+            out.println("</div>");
+        }
 
         out.println("<div class='card'>");
-        out.println("<form method='post' action='editSubmission'>");
-        out.println("<input type='hidden' name='formId' value='" + htmlEscape(formId) + "'>");
-        out.println("<input type='hidden' name='uri' value='" + htmlEscape(uri) + "'>");
+        if (!readOnly) {
+            out.println("<form method='post' action='editSubmission'>");
+            out.println("<input type='hidden' name='formId' value='" + htmlEscape(formId) + "'>");
+            out.println("<input type='hidden' name='uri' value='" + htmlEscape(uri) + "'>");
+        }
         out.println("<div class='form-grid'>");
         for (ColumnMeta col : columns) {
             Object value = currentValues.get(col.columnName);
             String inputType = inputTypeFor(col.sqlType);
             out.println("<label>" + htmlEscape(col.elementName) + "</label>");
+            String disabled = readOnly ? " disabled" : "";
             if ("checkbox".equals(inputType)) {
                 boolean checked = Boolean.TRUE.equals(value);
                 out.println("<input type='checkbox' name='" + htmlEscape(col.columnName) + "' value='true'"
-                        + (checked ? " checked" : "") + ">");
+                        + (checked ? " checked" : "") + disabled + ">");
             } else {
                 String textValue = value == null ? "" : formatValueForInput(value, inputType);
                 out.println("<input type='" + inputType + "' name='" + htmlEscape(col.columnName) + "' value='"
-                        + htmlEscape(textValue) + "'>");
+                        + htmlEscape(textValue) + "'" + disabled + ">");
             }
         }
         out.println("</div>");
-        out.println("<div class='actions'><button type='submit'>Enregistrer</button></div>");
+        if (!readOnly) {
+            out.println("<div class='actions'><button type='submit'>Enregistrer</button></div>");
+            out.println("</form>");
+        }
+        out.println("</div>");
+        writeFooter(out);
+    }
+
+    // ---- Duplication (nettoyage : copier une soumission avant de la corriger/renommer) -----------
+
+    private void renderDuplicateConfirm(Connection conn, PrintWriter out, String formId, String uri, String error)
+            throws SQLException {
+        writeHeader(out, "Dupliquer la soumission");
+        out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId) + "&uri=" + urlEncode(uri)
+                + "'>&laquo; Retour à la soumission</a></p>");
+        if (error != null) {
+            out.println("<p class='err'>Erreur : " + htmlEscape(error) + "</p>");
+        }
+        out.println("<div class='card'>");
+        out.println("<p>Créer une copie de la soumission <strong>" + htmlEscape(uri) + "</strong> avec un nouvel "
+                + "identifiant ? Vous arriverez ensuite directement sur la copie pour corriger ou renommer les champs "
+                + "voulus, sans toucher à l'originale.</p>");
+        out.println("<p class='info'>Les pièces jointes (photos, fichiers) ne sont pas dupliquées, seules les "
+                + "valeurs des champs le sont.</p>");
+        out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId) + "&action=duplicateConfirm'>");
+        out.println("<input type='hidden' name='uri' value='" + htmlEscape(uri) + "'>");
+        out.println("<div class='actions'><button type='submit'>" + ICON_DUPLICATE + " Dupliquer</button></div>");
         out.println("</form>");
         out.println("</div>");
         writeFooter(out);
+    }
+
+    /**
+     * Copie toutes les valeurs de champs (hors métadonnées et pièces jointes BINARY, absentes de
+     * listEditableColumns) d'une soumission existante vers une nouvelle ligne, nouvel _URI. Sert à
+     * "nettoyer" des données : dupliquer une soumission douteuse puis corriger/renommer la copie
+     * (ex. le champ instanceName quand le formulaire en définit un) avant, éventuellement, de
+     * supprimer l'originale - plutôt que de perdre la trace en modifiant l'originale directement.
+     * _SUBMISSION_DATE/_CREATION_DATE de la copie = maintenant (c'est une nouvelle ligne du point de
+     * vue de la base), au même titre qu'une création manuelle (cf. createSubmission).
+     */
+    private String duplicateSubmission(Connection conn, String formId, String uri) throws Exception {
+        String coreTable = resolveCoreTableOrThrow(conn, formId);
+        final List<ColumnMeta> columns = listEditableColumns(conn, coreTable);
+        final Map<String, ColumnMeta> byColumnName = new java.util.HashMap<String, ColumnMeta>();
+        for (ColumnMeta col : columns) {
+            byColumnName.put(col.columnName, col);
+        }
+        final java.util.Map<String, Object> currentValues = new java.util.HashMap<String, Object>();
+        String sql = "SELECT * FROM odk_prod.\"" + coreTable + "\" WHERE \"_URI\" = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, uri);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    throw new SQLException("Soumission introuvable : " + uri);
+                }
+                for (ColumnMeta col : columns) {
+                    currentValues.put(col.columnName, rs.getObject(col.columnName));
+                }
+            }
+        }
+        return insertSubmissionRow(conn, coreTable, columns, currentUserName(), new ValueSource() {
+            public String get(String columnName) {
+                ColumnMeta col = byColumnName.get(columnName);
+                Object value = currentValues.get(columnName);
+                if (col == null || value == null) {
+                    return null;
+                }
+                String inputType = inputTypeFor(col.sqlType);
+                if ("checkbox".equals(inputType)) {
+                    return Boolean.TRUE.equals(value) ? "true" : "false";
+                }
+                return formatValueForInput(value, inputType);
+            }
+        });
     }
 
     // ---- Suppression (une soumission ou une selection) ------------------------------------------
@@ -1251,6 +1558,7 @@ public class EditSubmissionServlet extends HttpServlet {
                 ps.setString(1, formId);
                 ps.executeUpdate();
             }
+            ActivityLog.record(conn, "form.delete", "formulaire", formId, "Formulaire et toutes ses soumissions supprimés");
             resp.sendRedirect("editSubmission?deletedForm=1");
         } catch (Exception e) {
             try {
@@ -1436,7 +1744,7 @@ public class EditSubmissionServlet extends HttpServlet {
     private String createSubmission(Connection conn, final HttpServletRequest req, String formId) throws Exception {
         String coreTable = resolveCoreTableOrThrow(conn, formId);
         List<ColumnMeta> columns = listEditableColumns(conn, coreTable);
-        return insertSubmissionRow(conn, coreTable, columns, currentUserName(), new ValueSource() {
+        return insertSubmissionRow(conn, coreTable, columns, currentUserName(), null, new ValueSource() {
             public String get(String columnName) {
                 return req.getParameter(columnName);
             }
@@ -1445,6 +1753,18 @@ public class EditSubmissionServlet extends HttpServlet {
 
     private String insertSubmissionRow(Connection conn, String coreTable, List<ColumnMeta> columns, String currentUser,
             ValueSource values) throws SQLException {
+        return insertSubmissionRow(conn, coreTable, columns, currentUser, null, values);
+    }
+
+    /**
+     * submissionDate : si non nul, utilisé pour _SUBMISSION_DATE au lieu de l'horodatage actuel -
+     * pour un import CSV qui doit préserver la date de soumission d'origine du fichier plutôt que
+     * de la remplacer par la date du jour (cf. insertCsvRows). _CREATION_DATE/_LAST_UPDATE_DATE
+     * restent toujours l'horodatage actuel : ils reflètent quand la ligne a été créée dans cette
+     * base, ce qui est réellement maintenant, que la donnée elle-même date d'avant ou non.
+     */
+    private String insertSubmissionRow(Connection conn, String coreTable, List<ColumnMeta> columns, String currentUser,
+            Timestamp submissionDate, ValueSource values) throws SQLException {
         String newUri = "uuid:" + java.util.UUID.randomUUID().toString();
         StringBuilder cols = new StringBuilder("\"_URI\",\"_CREATOR_URI_USER\",\"_CREATION_DATE\",\"_LAST_UPDATE_URI_USER\","
                 + "\"_LAST_UPDATE_DATE\",\"_IS_COMPLETE\",\"_SUBMISSION_DATE\",\"_MARKED_AS_COMPLETE_DATE\",\"META_INSTANCE_ID\"");
@@ -1463,7 +1783,7 @@ public class EditSubmissionServlet extends HttpServlet {
             ps.setString(idx++, currentUser);
             ps.setTimestamp(idx++, now);
             ps.setBoolean(idx++, true);
-            ps.setTimestamp(idx++, now);
+            ps.setTimestamp(idx++, submissionDate != null ? submissionDate : now);
             ps.setTimestamp(idx++, now);
             ps.setString(idx++, newUri);
             for (ColumnMeta col : columns) {
@@ -1487,6 +1807,9 @@ public class EditSubmissionServlet extends HttpServlet {
         out.println("<p class='info'>Le fichier CSV doit contenir une ligne d'en-tête avec les noms de colonnes exacts du "
                 + "formulaire. <a href='editSubmission?formId=" + urlEncode(formId)
                 + "&action=csvTemplate'>Télécharger un modèle CSV vide</a> pour obtenir les bons en-têtes.</p>");
+        out.println("<p class='info'>Si le fichier contient une colonne <strong>_SUBMISSION_DATE</strong> (par exemple "
+                + "issu d'un export), sa valeur est utilisée comme date de soumission pour chaque ligne ; sinon, "
+                + "la date du jour est utilisée.</p>");
         out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId)
                 + "&action=csvUpload' enctype='multipart/form-data'>");
         out.println("<p><input type='file' name='csvFile' accept='.csv,text/csv' required></p>");
@@ -1575,8 +1898,21 @@ public class EditSubmissionServlet extends HttpServlet {
         ColumnMeta[] columnForIndex = new ColumnMeta[header.length];
         List<String> recognized = new ArrayList<String>();
         List<String> unrecognized = new ArrayList<String>();
+        boolean[] isMetaIndex = new boolean[header.length];
+        boolean hasSubmissionDateColumn = false;
         for (int i = 0; i < header.length; i++) {
             String h = header[i] == null ? "" : header[i].trim().toUpperCase(java.util.Locale.ROOT);
+            if ("_SUBMISSION_DATE".equals(h)) {
+                hasSubmissionDateColumn = true;
+                isMetaIndex[i] = true;
+                continue;
+            }
+            if (isProtectedMetaColumn(h)) {
+                // Colonne technique (ex. _URI, présente si le fichier vient d'un export) : pas une
+                // donnée du formulaire, ni recensée ni signalée comme "non reconnue".
+                isMetaIndex[i] = true;
+                continue;
+            }
             ColumnMeta col = byColumnName.get(h);
             columnForIndex[i] = col;
             if (col != null) {
@@ -1617,6 +1953,9 @@ public class EditSubmissionServlet extends HttpServlet {
             out.println("<p class='err'>Aucune colonne du fichier ne correspond à ce formulaire. Vérifiez l'en-tête ou "
                     + "téléchargez le modèle CSV.</p>");
         }
+        out.println("<p class='info'>Date de soumission : " + (hasSubmissionDateColumn
+                ? "prise dans la colonne <strong>_SUBMISSION_DATE</strong> du fichier (ligne par ligne)."
+                : "date du jour (le fichier ne contient pas de colonne _SUBMISSION_DATE).") + "</p>");
         out.println("</div>");
 
         int totalDataRows = rows.size() - 1;
@@ -1624,7 +1963,8 @@ public class EditSubmissionServlet extends HttpServlet {
         out.println("<div style='overflow-x:auto;'>");
         out.println("<table><thead><tr>");
         for (int i = 0; i < header.length; i++) {
-            out.println("<th" + (columnForIndex[i] == null ? " class='err'" : "") + ">" + htmlEscape(header[i]) + "</th>");
+            out.println("<th" + (columnForIndex[i] == null && !isMetaIndex[i] ? " class='err'" : "") + ">"
+                    + htmlEscape(header[i]) + "</th>");
         }
         out.println("</tr></thead><tbody>");
         int shown = 0;
@@ -1725,9 +2065,17 @@ public class EditSubmissionServlet extends HttpServlet {
 
         String[] header = rows.get(0);
         ColumnMeta[] columnForIndex = new ColumnMeta[header.length];
+        int submissionDateIndex = -1;
         List<String> unrecognized = new ArrayList<String>();
         for (int i = 0; i < header.length; i++) {
             String h = header[i] == null ? "" : header[i].trim().toUpperCase(java.util.Locale.ROOT);
+            if ("_SUBMISSION_DATE".equals(h)) {
+                submissionDateIndex = i;
+                continue;
+            }
+            if (isProtectedMetaColumn(h)) {
+                continue;
+            }
             ColumnMeta col = byColumnName.get(h);
             columnForIndex[i] = col;
             if (col == null && !h.isEmpty()) {
@@ -1756,8 +2104,23 @@ public class EditSubmissionServlet extends HttpServlet {
                     valueMap.put(columnForIndex[i].columnName, rowData[i]);
                 }
             }
+            // Date de soumission prise dans le fichier (colonne _SUBMISSION_DATE) si presente et
+            // valide, plutot que d'utiliser systematiquement la date du jour - utile pour un import
+            // qui doit preserver des dates de soumission d'origine (ex. reimport d'un export).
+            Timestamp submissionDate = null;
+            if (submissionDateIndex >= 0 && submissionDateIndex < rowData.length) {
+                String raw = rowData[submissionDateIndex];
+                if (raw != null && !raw.trim().isEmpty()) {
+                    try {
+                        submissionDate = parseTimestamp(raw.trim());
+                    } catch (SQLException e) {
+                        errors.add("Ligne " + (r + 1) + " : date de soumission invalide (" + raw.trim()
+                                + "), soumission créée avec la date du jour.");
+                    }
+                }
+            }
             try {
-                insertSubmissionRow(conn, coreTable, columns, currentUser, new ValueSource() {
+                insertSubmissionRow(conn, coreTable, columns, currentUser, submissionDate, new ValueSource() {
                     public String get(String columnName) {
                         return valueMap.get(columnName);
                     }
@@ -1766,6 +2129,9 @@ public class EditSubmissionServlet extends HttpServlet {
             } catch (Exception e) {
                 errors.add("Ligne " + (r + 1) + " : " + e.getMessage());
             }
+        }
+        if (success > 0) {
+            ActivityLog.record(conn, "submission.import_csv", "formulaire", formId, success + " soumission(s) créée(s) via import CSV");
         }
 
         out.println("<div class='card'>");
@@ -1786,6 +2152,18 @@ public class EditSubmissionServlet extends HttpServlet {
 
     // ---- Bulk CSV update (download, edit, re-import as an update instead of new rows) -----------
 
+    /**
+     * Vrai pour toute colonne technique ODK (_SUBMISSION_DATE, _LAST_UPDATE_DATE,
+     * _LAST_UPDATE_URI_USER, _CREATOR_URI_USER, _CREATION_DATE, _IS_COMPLETE,
+     * _MARKED_AS_COMPLETE_DATE, META_INSTANCE_ID...) - jamais des données du formulaire lui-même,
+     * qui commencent toujours par le nom de l'élément, pas par un underscore. _URI est exclu ici
+     * car géré séparément (il identifie la ligne à mettre à jour, cf. appelants). h doit déjà être
+     * en majuscules/trim (voir la boucle d'analyse d'en-tête dans renderCsvUpdatePreview/applyCsvUpdateRows).
+     */
+    private static boolean isProtectedMetaColumn(String h) {
+        return h.startsWith("_") || "META_INSTANCE_ID".equals(h);
+    }
+
     private void renderCsvUpdateForm(Connection conn, PrintWriter out, String formId, String error) throws SQLException {
         writeHeader(out, "Mettre à jour des soumissions (CSV) — " + formId);
         out.println("<p class='back-link'><a href='editSubmission?formId=" + urlEncode(formId)
@@ -1801,6 +2179,9 @@ public class EditSubmissionServlet extends HttpServlet {
                 + "(elle identifie quelle soumission mettre à jour).<br>"
                 + "3. Importez le fichier modifié ci-dessous : seules les colonnes présentes dans le fichier seront changées, "
                 + "les lignes dont le _URI ne correspond à aucune soumission seront ignorées et signalées.</p>");
+        out.println("<p class='info'>Les colonnes techniques (comme <strong>_SUBMISSION_DATE</strong>, la date de "
+                + "soumission) sont toujours ignorées, même présentes dans le fichier : une mise à jour ne les modifie "
+                + "jamais.</p>");
         out.println("<form method='post' action='editSubmission?formId=" + urlEncode(formId)
                 + "&action=csvUpdateUpload' enctype='multipart/form-data'>");
         out.println("<p><input type='file' name='csvFile' accept='.csv,text/csv' required></p>");
@@ -1875,7 +2256,10 @@ public class EditSubmissionServlet extends HttpServlet {
                 uriIndex = i;
                 continue;
             }
-            if ("_SUBMISSION_DATE".equals(h)) {
+            if (isProtectedMetaColumn(h)) {
+                // Colonne technique ODK (_SUBMISSION_DATE, _LAST_UPDATE_DATE, etc., presente si le
+                // fichier vient d'un export) : jamais modifiable via une mise a jour CSV, toujours
+                // ignoree silencieusement (ni recensee, ni signalee comme "non reconnue").
                 continue;
             }
             ColumnMeta col = byColumnName.get(h);
@@ -2062,7 +2446,7 @@ public class EditSubmissionServlet extends HttpServlet {
                 uriIndex = i;
                 continue;
             }
-            if ("_SUBMISSION_DATE".equals(h)) {
+            if (isProtectedMetaColumn(h)) {
                 continue;
             }
             ColumnMeta col = byColumnName.get(h);
@@ -2140,6 +2524,9 @@ public class EditSubmissionServlet extends HttpServlet {
                 errors.add("Ligne " + (r + 1) + " : " + e.getMessage());
             }
         }
+        if (success > 0) {
+            ActivityLog.record(conn, "submission.update_csv", "formulaire", formId, success + " soumission(s) mise(s) à jour via CSV");
+        }
 
         out.println("<div class='card'>");
         out.println("<p class='success'><strong>" + success + "</strong> soumission(s) mise(s) à jour.</p>");
@@ -2212,6 +2599,195 @@ public class EditSubmissionServlet extends HttpServlet {
             }
         }
         out.flush();
+    }
+
+    // ---- Export JSON, KML et Excel (mêmes filtres/sélection que le CSV ci-dessus) ----------------
+
+    private static String jsonEscape(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
+    }
+
+    /** Un objet JSON valide par valeur : nombres/booléens non guillemetés, tout le reste en texte échappé, null si absent. */
+    private static String jsonValue(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        if (value instanceof Boolean) {
+            return value.toString();
+        }
+        if (value instanceof BigDecimal) {
+            return ((BigDecimal) value).toPlainString();
+        }
+        if (value instanceof Integer || value instanceof Long || value instanceof Short
+                || value instanceof Double || value instanceof Float) {
+            return value.toString();
+        }
+        return "\"" + jsonEscape(value.toString()) + "\"";
+    }
+
+    private void streamJsonExport(Connection conn, HttpServletResponse resp, String formId, String[] selectedUris)
+            throws SQLException, IOException {
+        String coreTable = resolveCoreTableOrThrow(conn, formId);
+        List<ColumnMeta> columns = listEditableColumns(conn, coreTable);
+
+        resp.setContentType("application/json;charset=UTF-8");
+        resp.setHeader("Content-Disposition", "attachment; filename=\""
+                + formId.replaceAll("[^A-Za-z0-9_-]", "_") + ".json\"");
+        PrintWriter out = resp.getWriter();
+
+        String sql = selectionSql(coreTable, selectedUris);
+        out.print('[');
+        boolean first = true;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            bindSelection(ps, selectedUris);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    if (!first) {
+                        out.print(',');
+                    }
+                    first = false;
+                    out.print('{');
+                    Object subDate = rs.getObject("_SUBMISSION_DATE");
+                    out.print("\"_URI\":" + jsonValue(rs.getString("_URI")));
+                    out.print(",\"_SUBMISSION_DATE\":" + jsonValue(subDate == null ? null : subDate.toString()));
+                    for (ColumnMeta col : columns) {
+                        out.print(",\"" + jsonEscape(col.columnName) + "\":" + jsonValue(rs.getObject(col.columnName)));
+                    }
+                    out.print('}');
+                }
+            }
+        }
+        out.print(']');
+        out.flush();
+    }
+
+    private void streamXlsxExport(Connection conn, HttpServletResponse resp, String formId, String[] selectedUris)
+            throws SQLException, IOException {
+        String coreTable = resolveCoreTableOrThrow(conn, formId);
+        List<ColumnMeta> columns = listEditableColumns(conn, coreTable);
+
+        List<String> headers = new ArrayList<String>();
+        headers.add("_URI");
+        headers.add("_SUBMISSION_DATE");
+        for (ColumnMeta col : columns) {
+            headers.add(col.columnName);
+        }
+
+        List<Object[]> rows = new ArrayList<Object[]>();
+        String sql = selectionSql(coreTable, selectedUris);
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            bindSelection(ps, selectedUris);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Object[] row = new Object[headers.size()];
+                    row[0] = rs.getString("_URI");
+                    Object subDate = rs.getObject("_SUBMISSION_DATE");
+                    row[1] = subDate == null ? null : subDate.toString();
+                    int idx = 2;
+                    for (ColumnMeta col : columns) {
+                        row[idx++] = rs.getObject(col.columnName);
+                    }
+                    rows.add(row);
+                }
+            }
+        }
+
+        resp.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        resp.setHeader("Content-Disposition", "attachment; filename=\""
+                + formId.replaceAll("[^A-Za-z0-9_-]", "_") + ".xlsx\"");
+        XlsxWriter.write(resp.getOutputStream(), formId, headers, rows);
+    }
+
+    /** KML (Google Earth) : un Placemark par soumission géolocalisée, avec les autres champs en ExtendedData. */
+    private void streamKmlExport(Connection conn, HttpServletResponse resp, String formId) throws SQLException, IOException {
+        String coreTable = resolveCoreTableOrThrow(conn, formId);
+        List<ColumnMeta> columns = listEditableColumns(conn, coreTable);
+        List<GeoField> geoFields = findGeoFields(columns);
+        if (geoFields.isEmpty()) {
+            resp.sendError(HttpServletResponse.SC_BAD_REQUEST, "Ce formulaire ne contient aucun champ de géolocalisation.");
+            return;
+        }
+        GeoField geo = geoFields.get(0);
+
+        resp.setContentType("application/vnd.google-earth.kml+xml;charset=UTF-8");
+        resp.setHeader("Content-Disposition", "attachment; filename=\""
+                + formId.replaceAll("[^A-Za-z0-9_-]", "_") + ".kml\"");
+        PrintWriter out = resp.getWriter();
+        out.println("<?xml version='1.0' encoding='UTF-8'?>");
+        out.println("<kml xmlns='http://www.opengis.net/kml/2.2'><Document>");
+        out.println("<name>" + htmlEscape(formId) + "</name>");
+
+        String sql = "SELECT * FROM odk_prod.\"" + coreTable + "\" WHERE \"" + geo.latColumn + "\" IS NOT NULL "
+                + "AND \"" + geo.lngColumn + "\" IS NOT NULL";
+        try (PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                BigDecimal lat = rs.getBigDecimal(geo.latColumn);
+                BigDecimal lng = rs.getBigDecimal(geo.lngColumn);
+                if (lat == null || lng == null) {
+                    continue;
+                }
+                String rowUri = rs.getString("_URI");
+                Object subDate = rs.getObject("_SUBMISSION_DATE");
+                out.println("<Placemark>");
+                out.println("<name>" + htmlEscape(rowUri) + "</name>");
+                if (subDate != null) {
+                    out.println("<description>" + htmlEscape(subDate.toString()) + "</description>");
+                }
+                out.println("<ExtendedData>");
+                for (ColumnMeta col : columns) {
+                    Object v = rs.getObject(col.columnName);
+                    if (v != null) {
+                        out.println("<Data name='" + htmlEscape(col.columnName) + "'><value>"
+                                + htmlEscape(v.toString()) + "</value></Data>");
+                    }
+                }
+                out.println("</ExtendedData>");
+                out.println("<Point><coordinates>" + lng.toPlainString() + "," + lat.toPlainString() + "</coordinates></Point>");
+                out.println("</Placemark>");
+            }
+        }
+        out.println("</Document></kml>");
+    }
+
+    private static String selectionSql(String coreTable, String[] selectedUris) {
+        boolean hasSelection = selectedUris != null && selectedUris.length > 0;
+        if (hasSelection) {
+            StringBuilder placeholders = new StringBuilder();
+            for (int i = 0; i < selectedUris.length; i++) {
+                if (i > 0) {
+                    placeholders.append(',');
+                }
+                placeholders.append('?');
+            }
+            return "SELECT * FROM odk_prod.\"" + coreTable + "\" WHERE \"_URI\" IN (" + placeholders + ") "
+                    + "ORDER BY \"_SUBMISSION_DATE\" DESC NULLS LAST";
+        }
+        return "SELECT * FROM odk_prod.\"" + coreTable + "\" ORDER BY \"_SUBMISSION_DATE\" DESC NULLS LAST";
+    }
+
+    private static void bindSelection(PreparedStatement ps, String[] selectedUris) throws SQLException {
+        if (selectedUris != null) {
+            for (int i = 0; i < selectedUris.length; i++) {
+                ps.setString(i + 1, selectedUris[i]);
+            }
+        }
     }
 
     // ---- Map view (Leaflet / OpenStreetMap, no API key required) -------------------------------

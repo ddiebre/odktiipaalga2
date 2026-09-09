@@ -2,11 +2,14 @@ package odk.profile;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.sql.Connection;
+import java.sql.SQLException;
 
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.sql.DataSource;
 
 import org.opendatakit.aggregate.ContextFactory;
 import org.opendatakit.common.security.client.CredentialsInfo;
@@ -21,6 +24,7 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
+import odk.common.ActivityLog;
 import odk.common.FormSchemaUtil;
 import odk.common.NavBar;
 
@@ -135,6 +139,10 @@ public class ProfileServlet extends HttpServlet {
 
             CredentialsInfo credentials = CredentialsInfoBuilderInternal.build(username, realm, newPassword);
             SecurityServiceUtil.setUserCredentials(credentials, cc);
+            try (Connection conn = ((DataSource) ctx.getBean("dataSource")).getConnection()) {
+                ActivityLog.record(conn, "user.password_change", "utilisateur", username, "Changement de son propre mot de passe");
+            } catch (SQLException ignored) {
+            }
             resp.sendRedirect("profile?updated=1");
         } catch (Exception e) {
             renderForm(out, null, "Erreur : " + e.getMessage());

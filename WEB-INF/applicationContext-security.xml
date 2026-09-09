@@ -49,12 +49,18 @@
 		<intercept-url pattern="/aggregateui/submissionservice" access="hasRole('ROLE_DATA_VIEWER')" />
 		<intercept-url pattern="/aggregateui/formservice" access="hasRole('ROLE_DATA_VIEWER')" />
 
-		<intercept-url pattern="/editSubmission" access="isFullyAuthenticated() and hasRole('ROLE_DATA_OWNER')" />
-		<intercept-url pattern="/home" access="isFullyAuthenticated() and hasRole('ROLE_DATA_OWNER')" />
-		<intercept-url pattern="/project" access="isFullyAuthenticated() and hasRole('ROLE_DATA_OWNER')" />
+		<!-- ROLE_DATA_VIEWER (Lecteur de donnees) peut parcourir/telecharger ; la creation/modification/
+		     suppression a l'interieur de ces outils reste controlee en plus, cote application, par
+		     ROLE_DATA_OWNER (Gestionnaire de formulaires) - voir EditSubmissionServlet/ProjectServlet/HomeServlet. -->
+		<intercept-url pattern="/editSubmission" access="isFullyAuthenticated() and hasRole('ROLE_DATA_VIEWER')" />
+		<intercept-url pattern="/home" access="isFullyAuthenticated() and hasRole('ROLE_DATA_VIEWER')" />
+		<intercept-url pattern="/project" access="isFullyAuthenticated() and hasRole('ROLE_DATA_VIEWER')" />
 		<intercept-url pattern="/manageUsers" access="isFullyAuthenticated() and hasRole('ROLE_SITE_ACCESS_ADMIN')" />
 		<intercept-url pattern="/admin" access="isFullyAuthenticated() and hasRole('ROLE_SITE_ACCESS_ADMIN')" />
 		<intercept-url pattern="/profile" access="isFullyAuthenticated() and hasRole('ROLE_USER')" />
+		<intercept-url pattern="/media" access="isFullyAuthenticated() and hasRole('ROLE_DATA_VIEWER')" />
+		<intercept-url pattern="/charts" access="isFullyAuthenticated() and hasRole('ROLE_DATA_VIEWER')" />
+		<intercept-url pattern="/activity" access="isFullyAuthenticated() and hasRole('ROLE_SITE_ACCESS_ADMIN')" />
 
 		<intercept-url pattern="/aggregateui/formadminservice" access="hasRole('ROLE_DATA_OWNER')" />
 		<intercept-url pattern="/aggregateui/servicesadminservice" access="hasRole('ROLE_DATA_OWNER')" />
@@ -83,6 +89,7 @@
 		<intercept-url pattern="/favicon.ico" access="true" />
 		<intercept-url pattern="/index.html" access="true" />
 		<intercept-url pattern="/logout.html" access="true" />
+		<intercept-url pattern="/login" access="true" />
 		<intercept-url pattern="/odk_color.png" access="true" />
 		<intercept-url pattern="/multimode_login.html" access="true" />
 		<intercept-url pattern="/relogin.html" access="true" />
@@ -361,6 +368,16 @@
 		</beans:property>
 	</beans:bean>
 
+	<!-- Page de connexion HTML (odk.login.LoginServlet) au lieu de la popup Digest native du
+	     navigateur, pour tout trafic qui n'est pas un appareil ODK Collect/OpenRosa (voir les deux
+	     entrees hasHeader ci-dessous, inchangees : elles gardent Digest, obligatoire pour ces
+	     appareils). Une fois connecte via /login, une session normale s'ouvre - aucun autre outil
+	     (natif ou custom) n'est affecte, ils continuent de fonctionner via cette session. -->
+	<beans:bean id="loginPageEntryPoint"
+		class="org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint">
+		<beans:constructor-arg value="/login" />
+	</beans:bean>
+
 	<beans:bean id="delegatingAuthenticationEntryPoint"
 		class="org.springframework.security.web.authentication.DelegatingAuthenticationEntryPoint">
 		<beans:constructor-arg name="entryPoints">
@@ -369,7 +386,7 @@
                       <beans:entry key="hasHeader('X-OpenDataKit-Version','2.0')" value-ref="${security.server.deviceAuthentication}EntryPoint" />
                       			</beans:map>
 		</beans:constructor-arg>
-		<beans:property name="defaultEntryPoint" ref="${security.server.deviceAuthentication}EntryPoint" />
+		<beans:property name="defaultEntryPoint" ref="loginPageEntryPoint" />
 	</beans:bean>
 
 	<!-- This forces the login to use the configured locally-held credential mechanism -->

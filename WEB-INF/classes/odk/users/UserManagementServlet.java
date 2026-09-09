@@ -32,6 +32,7 @@ import org.springframework.security.authentication.encoding.MessageDigestPasswor
 import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
+import odk.common.ActivityLog;
 import odk.common.FormSchemaUtil;
 import odk.common.NavBar;
 
@@ -418,6 +419,14 @@ public class UserManagementServlet extends HttpServlet {
         writeFooter(out);
     }
 
+    /** Ouvre sa propre connexion pour le journal d'activité (les méthodes user.* n'en ont pas déjà toutes une en portée). */
+    private void logActivity(String action, String targetId, String details) {
+        try (Connection conn = getDataSource().getConnection()) {
+            ActivityLog.record(conn, action, "utilisateur", targetId, details);
+        } catch (SQLException ignored) {
+        }
+    }
+
     private void handleCreate(CallingContext cc, HttpServletRequest req, HttpServletResponse resp) throws IOException {
         String username = trimToNull(req.getParameter("username"));
         String fullName = trimToNull(req.getParameter("fullName"));
@@ -450,6 +459,7 @@ public class UserManagementServlet extends HttpServlet {
             CredentialsInfo credentials = CredentialsInfoBuilderInternal.build(username, realm, password);
             SecurityServiceUtil.setUserCredentials(credentials, cc);
 
+            logActivity("user.create", username, "Rôles : " + groupsToLabel(groups));
             resp.sendRedirect("manageUsers?created=1");
         } catch (Exception e) {
             renderUserForm(resp.getWriter(), false, username, fullName, groups, "Erreur : " + e.getMessage());
@@ -480,6 +490,8 @@ public class UserManagementServlet extends HttpServlet {
                 SecurityServiceUtil.setUserCredentials(credentials, cc);
             }
 
+            logActivity("user.update", username, "Rôles : " + groupsToLabel(groups)
+                    + (password != null && !password.isEmpty() ? " (mot de passe réinitialisé)" : ""));
             resp.sendRedirect("manageUsers?updated=1");
         } catch (Exception e) {
             renderUserForm(resp.getWriter(), true, username, fullName, groups, "Erreur : " + e.getMessage());
@@ -506,6 +518,7 @@ public class UserManagementServlet extends HttpServlet {
             if (target != null) {
                 all.remove(target);
                 SecurityServiceUtil.setStandardSiteAccessConfiguration(all, new ArrayList<GrantedAuthorityName>(), cc);
+                logActivity("user.delete", username, null);
             }
             resp.sendRedirect("manageUsers?deleted=1");
         } catch (Exception e) {
@@ -544,6 +557,7 @@ public class UserManagementServlet extends HttpServlet {
                 target.setAssignedUserGroups(new TreeSet<GrantedAuthorityName>());
                 SecurityServiceUtil.setStandardSiteAccessConfiguration(all, new ArrayList<GrantedAuthorityName>(), cc);
                 setUserActive(conn, username, false, savedRoles, currentUsername);
+                ActivityLog.record(conn, "user.deactivate", "utilisateur", username, null);
             }
             resp.sendRedirect("manageUsers?deactivated=1");
         } catch (Exception e) {
@@ -577,6 +591,7 @@ public class UserManagementServlet extends HttpServlet {
                 target.setAssignedUserGroups(rolesFromStored(savedRoles));
                 SecurityServiceUtil.setStandardSiteAccessConfiguration(all, new ArrayList<GrantedAuthorityName>(), cc);
                 setUserActive(conn, username, true, null, FormSchemaUtil.currentLocalUsername());
+                ActivityLog.record(conn, "user.reactivate", "utilisateur", username, null);
             }
             resp.sendRedirect("manageUsers?reactivated=1");
         } catch (Exception e) {

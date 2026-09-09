@@ -82,11 +82,42 @@
         });
     }
 
+    /* Menus deroulants generiques (.dropdown / .dropdown-trigger / .dropdown-menu) - utilise
+     * pour regrouper, par exemple, plusieurs boutons de telechargement (CSV/JSON/Excel/KML) sous
+     * un seul bouton "Telecharger". Un seul menu ouvert a la fois. */
+    function setUpDropdowns() {
+        var dropdowns = document.querySelectorAll('.dropdown');
+        for (var i = 0; i < dropdowns.length; i++) {
+            (function (dropdown) {
+                var trigger = dropdown.querySelector('.dropdown-trigger');
+                if (!trigger) {
+                    return;
+                }
+                trigger.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    var wasOpen = dropdown.classList.contains('open');
+                    for (var j = 0; j < dropdowns.length; j++) {
+                        dropdowns[j].classList.remove('open');
+                    }
+                    if (!wasOpen) {
+                        dropdown.classList.add('open');
+                    }
+                });
+            })(dropdowns[i]);
+        }
+        document.addEventListener('click', function () {
+            for (var i = 0; i < dropdowns.length; i++) {
+                dropdowns[i].classList.remove('open');
+            }
+        });
+    }
+
     document.addEventListener('DOMContentLoaded', function () {
         var wrappers = document.querySelectorAll('.table-enhance');
         for (var i = 0; i < wrappers.length; i++) {
             enhanceTable(wrappers[i]);
         }
         setUpProfileMenu();
+        setUpDropdowns();
     });
 })();

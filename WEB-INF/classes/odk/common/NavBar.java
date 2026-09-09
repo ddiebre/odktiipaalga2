@@ -16,8 +16,8 @@ public final class NavBar {
     }
 
     /**
-     * @param activeSection l'une de "accueil", "projets", "formulaires", "soumissions", "utilisateurs"
-     *                      (ou null/valeur inconnue si la page ne correspond a aucune section)
+     * @param activeSection l'une de "accueil", "projets", "formulaires", "soumissions", "medias", "graphiques",
+     *                      "utilisateurs", "parametres" (ou null/valeur inconnue si la page ne correspond a aucune section)
      */
     public static void render(PrintWriter out, ServletContext servletContext, String activeSection) {
         boolean isSiteAdmin = FormSchemaUtil.currentUserHasRole("ROLE_SITE_ACCESS_ADMIN", servletContext);
@@ -30,8 +30,11 @@ public final class NavBar {
         navLink(out, "Projets", "project", "projets".equals(activeSection));
         navLink(out, "Formulaires", "editSubmission", "formulaires".equals(activeSection));
         navLink(out, "Soumissions", "editSubmission?action=submissions", "soumissions".equals(activeSection));
+        navLink(out, "Médias", "media", "medias".equals(activeSection));
+        navLink(out, "Graphiques", "charts", "graphiques".equals(activeSection));
         if (isSiteAdmin) {
             navLink(out, "Utilisateurs", "manageUsers", "utilisateurs".equals(activeSection));
+            navLink(out, "Paramètres", "activity", "parametres".equals(activeSection));
         }
         out.println("</nav>");
         out.println("<div class='navbar-user'>");
