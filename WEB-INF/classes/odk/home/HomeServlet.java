@@ -152,7 +152,7 @@ public class HomeServlet extends HttpServlet {
 
         try (Connection conn = getDataSource().getConnection()) {
             if (canManage) {
-                projectCount = countRows(conn, "SELECT COUNT(*) FROM odk_prod.app_project");
+                projectCount = countRows(conn, "SELECT COUNT(*) FROM odk_prod.app_project WHERE deleted = false");
                 formCount = countRows(conn, "SELECT COUNT(*) FROM odk_prod.\"_form_info_submission_association\" "
                         + "WHERE \"IS_SUBMISSION_ALLOWED\" = true AND \"URI_SUBMISSION_DATA_MODEL\" IS NOT NULL");
             } else {

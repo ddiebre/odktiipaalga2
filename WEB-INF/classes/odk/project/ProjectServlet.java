@@ -101,6 +101,12 @@ public class ProjectServlet extends HttpServlet {
             st.execute("ALTER TABLE odk_prod.app_project ADD COLUMN IF NOT EXISTS "
                     + "parent_id INTEGER REFERENCES odk_prod.app_project(id) ON DELETE SET NULL");
             st.execute("CREATE INDEX IF NOT EXISTS app_project_parent_id_idx ON odk_prod.app_project(parent_id)");
+            // Suppression logique (corbeille) : un projet "supprime" garde sa ligne avec deleted = true,
+            // et toutes les lectures filtrent sur deleted = false. Il peut etre restaure, ou supprime
+            // definitivement (vrai DELETE) depuis la corbeille.
+            st.execute("ALTER TABLE odk_prod.app_project ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT false");
+            st.execute("ALTER TABLE odk_prod.app_project ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP");
+            st.execute("ALTER TABLE odk_prod.app_project ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(255)");
             st.execute("CREATE TABLE IF NOT EXISTS odk_prod.app_project_form ("
                     + "id SERIAL PRIMARY KEY,"
                     + "project_id INTEGER NOT NULL REFERENCES odk_prod.app_project(id) ON DELETE CASCADE,"
@@ -123,7 +129,11 @@ public class ProjectServlet extends HttpServlet {
                     + "ON odk_prod.app_project_user(project_id)");
             st.execute("CREATE INDEX IF NOT EXISTS app_project_user_username_idx "
                     + "ON odk_prod.app_project_user(username)");
-            getServletContext().log("ProjectServlet: tables odk_prod.app_project / app_project_form / app_project_user prêtes.");
+            // Corbeille des soumissions (utilisee par /editSubmission, /charts, /media...) : creee ici
+            // car ce servlet est charge au demarrage (load-on-startup), avant toute lecture.
+            FormSchemaUtil.ensureSubmissionTables(st);
+            getServletContext().log("ProjectServlet: tables odk_prod.app_project / app_project_form / app_project_user / "
+                    + "app_submission_deleted prêtes.");
         } catch (SQLException e) {
             getServletContext().log("ProjectServlet: échec de la création des tables app_project", e);
         }
@@ -199,7 +209,13 @@ public class ProjectServlet extends HttpServlet {
             resp.setContentType("text/html;charset=UTF-8");
             PrintWriter out = resp.getWriter();
             if (projectId == null) {
-                if ("new".equals(action)) {
+                if ("trash".equals(action)) {
+                    if (!canManage) {
+                        renderAccessDenied(out, "project", "Projets");
+                        return;
+                    }
+                    renderTrash(conn, out, req.getParameter("error"), req.getParameter("notice"));
+                } else if ("new".equals(action)) {
                     if (!canManage) {
                         renderAccessDenied(out, "project", "Projets");
                         return;
@@ -287,6 +303,12 @@ public class ProjectServlet extends HttpServlet {
                 resp.sendRedirect("project");
                 return;
             }
+            // Actions de la corbeille : portent sur un projet supprime (deleted = true), donc
+            // traitees avant getProject() qui ne voit que les projets actifs.
+            if ("restore".equals(action) || "purge".equals(action)) {
+                handleTrashAction(conn, resp, action, projectId);
+                return;
+            }
             Project project = getProject(conn, projectId);
             if (project == null) {
                 resp.sendRedirect("project");
@@ -353,8 +375,9 @@ public class ProjectServlet extends HttpServlet {
             } else if ("importXml".equals(action)) {
                 handleImportXml(conn, req, resp, project);
             } else if ("deleteConfirm".equals(action)) {
-                deleteProject(conn, projectId);
-                ActivityLog.record(conn, "project.delete", "projet", String.valueOf(projectId), "Nom : " + project.name);
+                int count = softDeleteProject(conn, projectId, currentUserName());
+                ActivityLog.record(conn, "project.delete", "projet", String.valueOf(projectId),
+                        "Mis à la corbeille : " + project.name + (count > 1 ? " (+ " + (count - 1) + " sous-projet(s))" : ""));
                 resp.sendRedirect("project");
             } else {
                 resp.sendRedirect("project?projectId=" + projectId);
@@ -381,6 +404,7 @@ public class ProjectServlet extends HttpServlet {
         String sql = "SELECT p.id, p.name, p.description, p.created_at, COUNT(f.id), p.parent_id "
                 + "FROM odk_prod.app_project p "
                 + "LEFT JOIN odk_prod.app_project_form f ON f.project_id = p.id "
+                + "WHERE p.deleted = false "
                 + "GROUP BY p.id, p.name, p.description, p.created_at, p.parent_id "
                 + "ORDER BY p.name";
         List<ProjectSummary> result = new ArrayList<ProjectSummary>();
@@ -395,7 +419,7 @@ public class ProjectServlet extends HttpServlet {
     }
 
     private static Project getProject(Connection conn, int id) throws SQLException {
-        String sql = "SELECT id, name, description, parent_id FROM odk_prod.app_project WHERE id = ?";
+        String sql = "SELECT id, name, description, parent_id FROM odk_prod.app_project WHERE id = ? AND deleted = false";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, id);
             try (ResultSet rs = ps.executeQuery()) {
@@ -465,7 +489,7 @@ public class ProjectServlet extends HttpServlet {
         String sql = "SELECT p.id, p.name, p.description, p.created_at, COUNT(f.id), p.parent_id "
                 + "FROM odk_prod.app_project p "
                 + "LEFT JOIN odk_prod.app_project_form f ON f.project_id = p.id "
-                + "WHERE p.parent_id = ? "
+                + "WHERE p.parent_id = ? AND p.deleted = false "
                 + "GROUP BY p.id, p.name, p.description, p.created_at, p.parent_id "
                 + "ORDER BY p.name";
         List<ProjectSummary> result = new ArrayList<ProjectSummary>();
@@ -589,12 +613,187 @@ public class ProjectServlet extends HttpServlet {
         }
     }
 
-    private static void deleteProject(Connection conn, int id) throws SQLException {
-        String sql = "DELETE FROM odk_prod.app_project WHERE id = ?";
+    // ---- Suppression logique (corbeille) -------------------------------------------------------
+
+    /**
+     * Sous-arbre d'un projet (lui-même + descendants), y compris les projets déjà supprimés.
+     * UNION (et non UNION ALL) déduplique, ce qui garantit la terminaison même en cas de cycle.
+     */
+    private static final String SUBTREE_CTE = "WITH RECURSIVE tree AS ("
+            + "SELECT id FROM odk_prod.app_project WHERE id = ? "
+            + "UNION SELECT p.id FROM odk_prod.app_project p JOIN tree t ON p.parent_id = t.id) ";
+
+    /**
+     * Met le projet et tous ses sous-projets actifs à la corbeille (deleted = true). Ils partagent
+     * le même deleted_at (now() est constant dans une instruction), ce qui permet ensuite de les
+     * restaurer ensemble. Les rattachements formulaires/utilisateurs sont conservés tels quels.
+     * Retourne le nombre de projets mis à la corbeille.
+     */
+    private static int softDeleteProject(Connection conn, int id, String deletedBy) throws SQLException {
+        String sql = SUBTREE_CTE + "UPDATE odk_prod.app_project SET deleted = true, deleted_at = now(), deleted_by = ? "
+                + "WHERE id IN (SELECT id FROM tree) AND deleted = false";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, id);
-            ps.executeUpdate();
+            ps.setString(2, deletedBy);
+            return ps.executeUpdate();
         }
+    }
+
+    /** Un projet de la corbeille (deleted = true). */
+    private static class DeletedProject {
+        final int id;
+        final String name;
+        final Integer parentId;
+        final boolean parentDeleted;
+        final String parentName;
+        final Timestamp deletedAt;
+        final String deletedBy;
+        final int subProjectCount;
+
+        DeletedProject(int id, String name, Integer parentId, boolean parentDeleted, String parentName,
+                Timestamp deletedAt, String deletedBy, int subProjectCount) {
+            this.id = id;
+            this.name = name;
+            this.parentId = parentId;
+            this.parentDeleted = parentDeleted;
+            this.parentName = parentName;
+            this.deletedAt = deletedAt;
+            this.deletedBy = deletedBy;
+            this.subProjectCount = subProjectCount;
+        }
+    }
+
+    /**
+     * Les suppressions "racines" de la corbeille : un projet supprimé en même temps que son parent
+     * (même deleted_at) est masqué, il sera restauré / purgé avec lui. subProjectCount compte ces
+     * sous-projets entraînés (approximation : enfants directs et indirects au même deleted_at).
+     */
+    private static List<DeletedProject> listDeletedProjects(Connection conn) throws SQLException {
+        String sql = "SELECT p.id, p.name, p.parent_id, COALESCE(pp.deleted, false), pp.name, p.deleted_at, p.deleted_by, "
+                + "(WITH RECURSIVE tree AS (SELECT c.id FROM odk_prod.app_project c WHERE c.parent_id = p.id "
+                + "   AND c.deleted = true AND c.deleted_at = p.deleted_at "
+                + " UNION SELECT c.id FROM odk_prod.app_project c JOIN tree t ON c.parent_id = t.id "
+                + "   WHERE c.deleted = true AND c.deleted_at = p.deleted_at) SELECT COUNT(*) FROM tree) "
+                + "FROM odk_prod.app_project p "
+                + "LEFT JOIN odk_prod.app_project pp ON pp.id = p.parent_id "
+                + "WHERE p.deleted = true "
+                + "AND NOT (pp.deleted IS TRUE AND pp.deleted_at = p.deleted_at) "
+                + "ORDER BY p.deleted_at DESC, p.name";
+        List<DeletedProject> result = new ArrayList<DeletedProject>();
+        try (PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                int parentId = rs.getInt(3);
+                Integer parent = rs.wasNull() ? null : Integer.valueOf(parentId);
+                result.add(new DeletedProject(rs.getInt(1), rs.getString(2), parent, rs.getBoolean(4),
+                        rs.getString(5), rs.getTimestamp(6), rs.getString(7), rs.getInt(8)));
+            }
+        }
+        return result;
+    }
+
+    private static DeletedProject getDeletedProject(Connection conn, int id) throws SQLException {
+        for (DeletedProject d : listDeletedProjects(conn)) {
+            if (d.id == id) {
+                return d;
+            }
+        }
+        return null;
+    }
+
+    /** Restaure le projet et les sous-projets supprimés en même temps que lui (même deleted_at). */
+    private static int restoreProject(Connection conn, int id) throws SQLException {
+        String sql = SUBTREE_CTE + "UPDATE odk_prod.app_project SET deleted = false, deleted_at = NULL, deleted_by = NULL, "
+                + "updated_at = now() WHERE id IN (SELECT id FROM tree) AND deleted = true "
+                + "AND deleted_at = (SELECT deleted_at FROM odk_prod.app_project WHERE id = ?)";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, id);
+            ps.setInt(2, id);
+            return ps.executeUpdate();
+        }
+    }
+
+    /**
+     * Suppression définitive (vrai DELETE) du projet et de ses sous-projets eux aussi à la corbeille.
+     * Les rattachements app_project_form / app_project_user partent avec (ON DELETE CASCADE) ;
+     * les formulaires ODK et leurs soumissions ne sont pas touchés.
+     */
+    private static int purgeProject(Connection conn, int id) throws SQLException {
+        String sql = SUBTREE_CTE + "DELETE FROM odk_prod.app_project WHERE id IN (SELECT id FROM tree) AND deleted = true";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, id);
+            return ps.executeUpdate();
+        }
+    }
+
+    private void handleTrashAction(Connection conn, HttpServletResponse resp, String action, int projectId)
+            throws SQLException, IOException {
+        DeletedProject deleted = getDeletedProject(conn, projectId);
+        if (deleted == null) {
+            resp.sendRedirect("project?action=trash&error=" + urlEncode("Projet introuvable dans la corbeille."));
+            return;
+        }
+        if ("restore".equals(action)) {
+            if (deleted.parentDeleted) {
+                resp.sendRedirect("project?action=trash&error=" + urlEncode("Le projet parent « " + deleted.parentName
+                        + " » est lui aussi dans la corbeille : restaurez-le d'abord."));
+                return;
+            }
+            int count = restoreProject(conn, projectId);
+            ActivityLog.record(conn, "project.restore", "projet", String.valueOf(projectId),
+                    "Restauré : " + deleted.name + (count > 1 ? " (+ " + (count - 1) + " sous-projet(s))" : ""));
+            resp.sendRedirect("project?projectId=" + projectId);
+        } else {
+            int count = purgeProject(conn, projectId);
+            ActivityLog.record(conn, "project.purge", "projet", String.valueOf(projectId),
+                    "Supprimé définitivement : " + deleted.name + (count > 1 ? " (+ " + (count - 1) + " sous-projet(s))" : ""));
+            resp.sendRedirect("project?action=trash&notice=" + urlEncode("Projet « " + deleted.name
+                    + " » supprimé définitivement."));
+        }
+    }
+
+    private void renderTrash(Connection conn, PrintWriter out, String error, String notice) throws SQLException {
+        writeHeader(out, "Corbeille des projets");
+        out.println("<p class='back-link'><a href='project'>&laquo; Liste des projets</a></p>");
+        if (error != null) {
+            out.println("<p class='err'>" + htmlEscape(error) + "</p>");
+        }
+        if (notice != null) {
+            out.println("<p class='success'>" + htmlEscape(notice) + "</p>");
+        }
+        out.println("<p class='info'>Un projet supprimé est conservé ici avec ses formulaires et utilisateurs rattachés. "
+                + "<strong>Restaurer</strong> le remet en place tel quel (avec les sous-projets supprimés en même temps). "
+                + "<strong>Supprimer définitivement</strong> efface le projet et ses rattachements ; les formulaires ODK "
+                + "et leurs soumissions ne sont jamais touchés.</p>");
+        List<DeletedProject> items = listDeletedProjects(conn);
+        if (items.isEmpty()) {
+            out.println("<p class='info'>La corbeille est vide.</p>");
+            writeFooter(out);
+            return;
+        }
+        out.println("<div class='table-enhance'>");
+        out.println("<input type='text' class='table-search-input' placeholder='Rechercher un projet...'>");
+        out.println("<table><thead><tr><th data-sortable>Projet</th><th data-sortable>Supprimé le</th>"
+                + "<th data-sortable>Par</th><th></th></tr></thead><tbody>");
+        for (DeletedProject d : items) {
+            String deletedBy = d.deletedBy == null ? "" : FormSchemaUtil.extractLocalUsername(d.deletedBy);
+            out.println("<tr><td><strong>" + htmlEscape(d.name) + "</strong>"
+                    + (d.subProjectCount > 0 ? "<div class='muted'>+ " + d.subProjectCount + " sous-projet(s)</div>" : "")
+                    + (d.parentDeleted ? "<div class='muted'>Parent « " + htmlEscape(d.parentName)
+                            + " » aussi dans la corbeille</div>" : "")
+                    + "</td>");
+            out.println("<td>" + htmlEscape(d.deletedAt == null ? "" : d.deletedAt.toString()) + "</td>");
+            out.println("<td>" + htmlEscape(deletedBy) + "</td>");
+            out.println("<td><div class='row-actions'>"
+                    + "<form class='inline' method='post' action='project?projectId=" + d.id + "&action=restore'>"
+                    + "<button type='submit' class='btn-link'" + (d.parentDeleted ? " disabled" : "") + ">Restaurer</button></form>"
+                    + "<form class='inline' method='post' action='project?projectId=" + d.id + "&action=purge' "
+                    + "onsubmit=\"return confirm('Supprimer définitivement ce projet ? Cette action est irréversible.');\">"
+                    + "<button type='submit' class='btn-link danger'>" + ICON_TRASH + " Supprimer définitivement</button></form>"
+                    + "</div></td></tr>");
+        }
+        out.println("</tbody></table>");
+        out.println("</div>");
+        writeFooter(out);
     }
 
     // ---- Import direct d'un formulaire XML (delegue a l'endpoint ODK existant /formUpload) ----
@@ -679,7 +878,8 @@ public class ProjectServlet extends HttpServlet {
     private void renderProjectList(Connection conn, PrintWriter out, boolean canManage) throws SQLException {
         writeHeader(out, "Projets");
         if (canManage) {
-            out.println("<div class='toolbar'><a class='btn-link' href='project?action=new'>" + ICON_PLUS + " Nouveau projet</a></div>");
+            out.println("<div class='toolbar'><a class='btn-link' href='project?action=new'>" + ICON_PLUS + " Nouveau projet</a>"
+                    + "<a class='btn-link' href='project?action=trash'>" + ICON_TRASH + " Corbeille</a></div>");
         }
         List<ProjectSummary> projects = listProjects(conn);
         if (!canManage) {
@@ -989,7 +1189,8 @@ public class ProjectServlet extends HttpServlet {
             for (String u : enqueteurs) {
                 String pattern = "uid:" + u + "|%";
                 try (PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*), MAX(\"_SUBMISSION_DATE\") "
-                        + "FROM odk_prod.\"" + coreTable + "\" WHERE \"_CREATOR_URI_USER\" LIKE ?")) {
+                        + "FROM odk_prod.\"" + coreTable + "\" WHERE \"_CREATOR_URI_USER\" LIKE ? AND "
+                        + FormSchemaUtil.CORE_NOT_DELETED)) {
                     ps.setString(1, pattern);
                     try (ResultSet rs = ps.executeQuery()) {
                         if (rs.next()) {
@@ -1108,13 +1309,14 @@ public class ProjectServlet extends HttpServlet {
     private void renderDeleteConfirm(Connection conn, PrintWriter out, Project project) throws SQLException {
         writeHeader(out, "Supprimer le projet");
         out.println("<p class='back-link'><a href='project?projectId=" + project.id + "'>&laquo; Retour au projet</a></p>");
-        int formCount = listAttachedForms(conn, project.id).size();
+        int subProjectCount = FormSchemaUtil.descendantProjectIds(conn, project.id).size() - 1;
         out.println("<div class='card'>");
-        out.println("<p>Voulez-vous vraiment supprimer le projet <strong>" + htmlEscape(project.name) + "</strong> ? "
-                + "Cette action retirera aussi son association avec " + formCount + " formulaire(s) "
-                + "(les soumissions elles-mêmes ne sont pas supprimées).</p>");
+        out.println("<p>Voulez-vous vraiment supprimer le projet <strong>" + htmlEscape(project.name) + "</strong>"
+                + (subProjectCount > 0 ? " et ses " + subProjectCount + " sous-projet(s)" : "") + " ? "
+                + "Il sera placé dans la <a href='project?action=trash'>corbeille</a>, d'où vous pourrez le restaurer "
+                + "avec ses formulaires et utilisateurs rattachés. Les soumissions ne sont pas touchées.</p>");
         out.println("<form method='post' action='project?projectId=" + project.id + "&action=deleteConfirm'>");
-        out.println("<div class='actions'><button type='submit' class='danger'>" + ICON_TRASH + " Supprimer définitivement</button></div>");
+        out.println("<div class='actions'><button type='submit' class='danger'>" + ICON_TRASH + " Mettre à la corbeille</button></div>");
         out.println("</form>");
         out.println("</div>");
         writeFooter(out);

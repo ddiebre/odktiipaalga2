@@ -116,9 +116,84 @@ public final class FormSchemaUtil {
         }
     }
 
+    // ---- Suppression logique des soumissions (corbeille) ------------------------------------------
+    //
+    // Les tables "core" des soumissions appartiennent a ODK Aggregate : plutot que d'y ajouter une
+    // colonne "deleted", une soumission supprimee est marquee dans une table a part
+    // (odk_prod.app_submission_deleted, une ligne par _URI). Le _URI d'une soumission ODK
+    // ("uuid:...") est unique globalement, il suffit donc comme cle. Toute lecture de soumissions
+    // doit ajouter notDeletedSql(...) a sa clause WHERE.
+
+    /**
+     * Cree si besoin les tables propres aux soumissions (corbeille, historique, corrections, reprises)
+     * - appele au demarrage (ProjectServlet.init) et par EditSubmissionServlet.init. Idempotent.
+     */
+    public static void ensureSubmissionTables(java.sql.Statement st) throws SQLException {
+        st.execute("CREATE TABLE IF NOT EXISTS odk_prod.app_submission_deleted ("
+                + "submission_uri VARCHAR(255) PRIMARY KEY,"
+                + "form_id VARCHAR(255) NOT NULL,"
+                + "deleted_at TIMESTAMP NOT NULL DEFAULT now(),"
+                + "deleted_by VARCHAR(255))");
+        st.execute("CREATE INDEX IF NOT EXISTS app_submission_deleted_form_id_idx "
+                + "ON odk_prod.app_submission_deleted(form_id)");
+        // Historique des modifications : une ligne par operation sur une soumission (modification,
+        // mise a jour CSV, retour arriere, corbeille...). "changes" = JSON des seuls champs modifies,
+        // [{"column","label","before","after"}], valeurs au format texte relisible par bindValue.
+        st.execute("CREATE TABLE IF NOT EXISTS odk_prod.app_submission_history ("
+                + "id SERIAL PRIMARY KEY,"
+                + "form_id VARCHAR(255) NOT NULL,"
+                + "submission_uri VARCHAR(255) NOT NULL,"
+                + "action VARCHAR(20) NOT NULL,"
+                + "changes TEXT,"
+                + "note TEXT,"
+                + "changed_at TIMESTAMP NOT NULL DEFAULT now(),"
+                + "changed_by VARCHAR(255))");
+        st.execute("CREATE INDEX IF NOT EXISTS app_submission_history_uri_idx "
+                + "ON odk_prod.app_submission_history(submission_uri)");
+        // Couche de corrections (nettoyage sans toucher au brut) : la table core d'ODK garde
+        // toujours la valeur envoyee du terrain ; une correction = la valeur nettoyee d'UN champ
+        // d'UNE soumission. Valeur nettoyee = correction si elle existe, sinon le brut. value peut
+        // etre NULL (correction "vider ce champ") : c'est l'existence de la ligne qui compte.
+        st.execute("CREATE TABLE IF NOT EXISTS odk_prod.app_submission_correction ("
+                + "submission_uri VARCHAR(255) NOT NULL,"
+                + "column_name VARCHAR(255) NOT NULL,"
+                + "form_id VARCHAR(255) NOT NULL,"
+                + "value TEXT,"
+                + "corrected_at TIMESTAMP NOT NULL DEFAULT now(),"
+                + "corrected_by VARCHAR(255),"
+                + "PRIMARY KEY (submission_uri, column_name))");
+        st.execute("CREATE INDEX IF NOT EXISTS app_submission_correction_form_id_idx "
+                + "ON odk_prod.app_submission_correction(form_id)");
+        // Statut de validation du nettoyage : pas de ligne = "a verifier" (etat par defaut de toute
+        // soumission recue) ; sinon VALIDEE ou REJETEE, avec un commentaire (motif d'un rejet).
+        st.execute("CREATE TABLE IF NOT EXISTS odk_prod.app_submission_status ("
+                + "submission_uri VARCHAR(255) PRIMARY KEY,"
+                + "form_id VARCHAR(255) NOT NULL,"
+                + "status VARCHAR(20) NOT NULL,"
+                + "comment TEXT,"
+                + "updated_at TIMESTAMP NOT NULL DEFAULT now(),"
+                + "updated_by VARCHAR(255))");
+        st.execute("CREATE INDEX IF NOT EXISTS app_submission_status_form_idx "
+                + "ON odk_prod.app_submission_status(form_id, status)");
+        st.execute("CREATE TABLE IF NOT EXISTS odk_prod.app_migration ("
+                + "name VARCHAR(255) PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT now())");
+    }
+
+    /**
+     * Condition SQL "cette soumission n'est pas a la corbeille". uriExpr est l'expression SQL
+     * (jamais une saisie utilisateur) qui donne le _URI de la soumission : "\"_URI\"" sur une table
+     * core, "\"_TOP_LEVEL_AURI\"" sur une table enfant (_BN, groupe repete).
+     */
+    public static String notDeletedSql(String uriExpr) {
+        return "NOT EXISTS (SELECT 1 FROM odk_prod.app_submission_deleted sd WHERE sd.submission_uri = " + uriExpr + ")";
+    }
+
+    /** Raccourci pour une table core : notDeletedSql("\"_URI\""). */
+    public static final String CORE_NOT_DELETED = notDeletedSql("\"_URI\"");
+
     public static SubmissionStats submissionStats(Connection conn, String formId) throws SQLException {
         String coreTable = resolveCoreTableOrThrow(conn, formId);
-        String sql = "SELECT COUNT(*), MAX(\"_SUBMISSION_DATE\") FROM odk_prod.\"" + coreTable + "\"";
+        String sql = "SELECT COUNT(*), MAX(\"_SUBMISSION_DATE\") FROM odk_prod.\"" + coreTable + "\" WHERE " + CORE_NOT_DELETED;
         try (PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
             rs.next();
             return new SubmissionStats(rs.getLong(1), rs.getTimestamp(2));
@@ -136,7 +211,7 @@ public final class FormSchemaUtil {
         long[] counts = new long[days];
         String sql = "SELECT (CURRENT_DATE - \"_SUBMISSION_DATE\"::date) AS days_ago, COUNT(*) "
                 + "FROM odk_prod.\"" + coreTable + "\" "
-                + "WHERE \"_SUBMISSION_DATE\" >= CURRENT_DATE - ? "
+                + "WHERE \"_SUBMISSION_DATE\" >= CURRENT_DATE - ? AND " + CORE_NOT_DELETED + " "
                 + "GROUP BY days_ago";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, days - 1);
@@ -224,7 +299,7 @@ public final class FormSchemaUtil {
     private static Map<Integer, Integer> loadProjectParents(Connection conn) throws SQLException {
         Map<Integer, Integer> parentOf = new HashMap<Integer, Integer>();
         try (java.sql.Statement st = conn.createStatement();
-                ResultSet rs = st.executeQuery("SELECT id, parent_id FROM odk_prod.app_project")) {
+                ResultSet rs = st.executeQuery("SELECT id, parent_id FROM odk_prod.app_project WHERE deleted = false")) {
             while (rs.next()) {
                 int id = rs.getInt(1);
                 int parentId = rs.getInt(2);
@@ -292,7 +367,11 @@ public final class FormSchemaUtil {
         if (username == null) {
             return ids;
         }
-        String sql = "SELECT project_id FROM odk_prod.app_project_user WHERE username = ?";
+        // Un projet à la corbeille (deleted = true) ne donne plus aucun accès - ni à ses formulaires
+        // sur ODK Collect, ni à ses données dans l'interface web.
+        String sql = "SELECT pu.project_id FROM odk_prod.app_project_user pu "
+                + "JOIN odk_prod.app_project p ON p.id = pu.project_id "
+                + "WHERE pu.username = ? AND p.deleted = false";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, username);
             try (ResultSet rs = ps.executeQuery()) {

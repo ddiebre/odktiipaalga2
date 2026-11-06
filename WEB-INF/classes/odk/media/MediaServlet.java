@@ -150,7 +150,7 @@ public class MediaServlet extends HttpServlet {
 
     private static List<ProjectNode> listAllProjects(Connection conn) throws SQLException {
         List<ProjectNode> result = new ArrayList<ProjectNode>();
-        try (PreparedStatement ps = conn.prepareStatement("SELECT id, name, parent_id FROM odk_prod.app_project ORDER BY name");
+        try (PreparedStatement ps = conn.prepareStatement("SELECT id, name, parent_id FROM odk_prod.app_project WHERE deleted = false ORDER BY name");
                 ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
                 int parentId = rs.getInt(3);
@@ -202,7 +202,8 @@ public class MediaServlet extends HttpServlet {
             int total = 0;
             for (FormSchemaUtil.MediaElement el : elements) {
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT COUNT(*) FROM odk_prod.\"" + el.tableName + "\"");
+                        "SELECT COUNT(*) FROM odk_prod.\"" + el.tableName + "\" WHERE "
+                                + FormSchemaUtil.notDeletedSql("\"_TOP_LEVEL_AURI\""));
                         ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
                         total += rs.getInt(1);
@@ -279,6 +280,7 @@ public class MediaServlet extends HttpServlet {
         for (FormSchemaUtil.MediaElement el : elements) {
             String sql = "SELECT \"_URI\",\"UNROOTED_FILE_PATH\",\"CONTENT_TYPE\",\"CONTENT_LENGTH\","
                     + "\"_CREATION_DATE\",\"_TOP_LEVEL_AURI\" FROM odk_prod.\"" + el.tableName + "\" "
+                    + "WHERE " + FormSchemaUtil.notDeletedSql("\"_TOP_LEVEL_AURI\"") + " "
                     + "ORDER BY \"_CREATION_DATE\" DESC LIMIT ?";
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setInt(1, MAX_ITEMS_PER_ELEMENT + 1);

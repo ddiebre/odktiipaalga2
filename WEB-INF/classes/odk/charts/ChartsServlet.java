@@ -135,7 +135,7 @@ public class ChartsServlet extends HttpServlet {
 
     private List<ProjectOption> listSelectableProjects(Connection conn, boolean canManage) throws SQLException {
         List<ProjectOption> all = new ArrayList<ProjectOption>();
-        try (PreparedStatement ps = conn.prepareStatement("SELECT id, name FROM odk_prod.app_project ORDER BY name");
+        try (PreparedStatement ps = conn.prepareStatement("SELECT id, name FROM odk_prod.app_project WHERE deleted = false ORDER BY name");
                 ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
                 all.add(new ProjectOption(rs.getInt(1), rs.getString(2)));
@@ -320,7 +320,8 @@ public class ChartsServlet extends HttpServlet {
             }
             for (String u : enqueteurs) {
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT COUNT(*) FROM odk_prod.\"" + coreTable + "\" WHERE \"_CREATOR_URI_USER\" LIKE ?")) {
+                        "SELECT COUNT(*) FROM odk_prod.\"" + coreTable + "\" WHERE \"_CREATOR_URI_USER\" LIKE ? AND "
+                                + FormSchemaUtil.CORE_NOT_DELETED)) {
                     ps.setString(1, "uid:" + u + "|%");
                     try (ResultSet rs = ps.executeQuery()) {
                         if (rs.next()) {
